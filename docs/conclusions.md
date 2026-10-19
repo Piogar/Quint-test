@@ -99,6 +99,30 @@ full" or "flusher full" needs many `StoreStatsRecord` calls in a row.
 - **Use `quint verify`** for an exhaustive check of short executions; it does
   not depend on random sampling.
 
+**Result after improving `step`** (same measurement, 10,000 traces × 20
+steps). `step` now has guards (most steps are operations that can succeed),
+weights (a branch listed several times is picked proportionally more often;
+`StoreStatsRecord` is listed twice) and one `anyCall` branch with
+unrestricted calls:
+
+| Situation | Uniform `step` | Guarded + weighted `step` |
+|---|---|---|
+| at least one sample accepted | 52.95% | **94.16%** |
+| something stored in the repository | 9.26% | **37.94%** |
+| W-01 HolderFull | 1.45% | 15.31% |
+| W-02 FlushRetried | 0.39% | 2.89% |
+| W-03 InvalidDiscarded | 6.46% | 29.22% |
+| W-04 StopWithRepositoryDown | 2.18% | 27.57% |
+| W-05 FullCycle | 2.81% | 26.61% |
+| W-06 StopDrainsToRepository | 3.23% | 29.83% |
+| W-07 FlusherFull (overflow while repository down) | — | 1.91% |
+| any overflow | 0.17% | 3.15% |
+
+Rejected calls still appear: each kind of rejection (`Start`, `Fetch`,
+`Flush`, `Stop`, `Finish`, ignored `StoreStatsRecord`) occurs in 41–71% of
+traces, so MBT keeps testing rejections. W-02 and W-07 are still the rarest
+scenarios; their weight can be raised further if needed.
+
 ### ⚠ A witness proves only what its condition says
 The simulator looks for the **cheapest** trace that satisfies a witness
 condition. If the condition is looser than the scenario's description, it
