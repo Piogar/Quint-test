@@ -421,9 +421,17 @@ module StatsFramework {
 //////////////////////////////////////////////////////////////////////////////
 
 // Instance with the small model values (design doc: Verification Only),
-// nondeterministic `step`, witnesses and scenario tests.
-//   quint run  stats.qnt --main=StatsFrameworkVerification --invariant=allProperties
-//   quint test stats.qnt --main=StatsFrameworkVerification
+// nondeterministic `step`, tool-specific steps for exhaustive checking,
+// witnesses and scenario tests.
+//   quint test   stats.qnt --main=StatsFrameworkVerification
+//   quint run    stats.qnt --main=StatsFrameworkVerification --invariant=allProperties \
+//                  --witnesses w01HolderFull ... w07FlusherFull
+//   quint verify stats.qnt --main=StatsFrameworkVerification --backend=tlc \
+//                  --step=stepTlc --invariant=allProperties
+//   quint verify stats.qnt --main=StatsFrameworkVerification \
+//                  --step=stepApalache --invariant=allProperties --max-steps=5
+// The standard `quint verify` with the simulation `step` does not finish for
+// this model (see conclusions.md, "Exhaustive verification is not free").
 module StatsFrameworkVerification {
 
   // Model constants (design doc: Verification Only, "Model constants")
@@ -432,13 +440,29 @@ module StatsFrameworkVerification {
   // Durations a collector may report, including invalid ones
   pure val MODEL_DURATIONS: Set[int] = Set(-1, 0, 5, 10, 11)
 
+  // Capacities are the smallest values that still show every threshold in the
+  // logic: holder full (2), flusher full, and a Fetch that moves only PART of
+  // the samples (flusher 3 > holder 2).
   import StatsFramework(
     COLLECTORS = MODEL_COLLECTORS,
     PROCEDURES = MODEL_PROCEDURES,
-    HOLDER_CAPACITY = 3,
-    FLUSHER_CAPACITY = 4,
+    HOLDER_CAPACITY = 2,
+    FLUSHER_CAPACITY = 3,
     MAX_DURATION_US = 10
   ).*
+
+  // Reduced argument domains and bounds for exhaustive checking with TLC
+  // (`stepTlc`). Procedure: never read by the logic, one value is enough.
+  // Durations: one valid, one invalid (boundaries are covered by Apalache,
+  // which takes any integer, and by `isValidBoundariesTest`).
+  pure val TLC_PROCEDURES: Set[str] = Set("p1")
+  pure val TLC_DURATIONS: Set[int] = Set(5, 11)
+  // At most 4 accepted samples (minimum to overflow the flusher: Fetch 2,
+  // collect 2 more, only 1 fits) and at most 1 sample dropped by a full
+  // holder. These bounds make TLC's state space finite; the logic never
+  // branches on counter values, so larger counters add no new behavior.
+  pure val TLC_MAX_ACCEPTED: int = 4
+  pure val TLC_MAX_DROPPED: int = 1
 
   //////////////////////////////////////////////////////////////////////////
   // Simulation: any operation, in any order, with nondeterministic arguments
@@ -489,6 +513,54 @@ module StatsFrameworkVerification {
     all { state == Stopping, collected.length() == 0, processing.length() == 0, doFinish },
     setAnyRepositoryAvailability,
     anyCall,
+  }
+
+  //////////////////////////////////////////////////////////////////////////
+  // Exhaustive checking: one step per tool (quint verify --step=...).
+  // All steps call the same spec actions; they only choose which calls and
+  // arguments the tool explores. Guards and weights from `step` only bias
+  // random simulation; exhaustive tools explore every branch anyway, so these
+  // steps list each operation once.
+  //////////////////////////////////////////////////////////////////////////
+
+  action storeSampleFrom(procedures: Set[str], durations: Set[int]): bool = {
+    nondet c = MODEL_COLLECTORS.oneOf()
+    nondet p = procedures.oneOf()
+    nondet d = durations.oneOf()
+    doStoreStatsRecord(c, p, d)
+  }
+
+  val totalAccepted: int = MODEL_COLLECTORS.fold(0, (acc, c) => acc + nextSeq.get(c))
+  val totalDropped: int = MODEL_COLLECTORS.fold(0, (acc, c) => acc + dropped.get(c))
+
+  // StoreStatsRecord is allowed in `stepTlc` only if its outcome stays within
+  // the TLC bounds (an ignored call changes nothing and is always allowed)
+  val storeWithinTlcBounds: bool =
+    if (state != Running) true
+    else if (collected.length() >= HOLDER_CAPACITY) totalDropped < TLC_MAX_DROPPED
+    else totalAccepted < TLC_MAX_ACCEPTED
+
+  // TLC: all distinct states within the bounds, at any depth
+  action stepTlc = any {
+    doStart,
+    all { storeWithinTlcBounds, storeSampleFrom(TLC_PROCEDURES, TLC_DURATIONS) },
+    doFetch,
+    doFlush,
+    doStop,
+    doFinish,
+    setAnyRepositoryAvailability,
+  }
+
+  // Apalache: all paths up to --max-steps, with ANY integer duration (the
+  // solver finds the boundary values itself)
+  action stepApalache = any {
+    doStart,
+    storeSampleFrom(MODEL_PROCEDURES, Int),
+    doFetch,
+    doFlush,
+    doStop,
+    doFinish,
+    setAnyRepositoryAvailability,
   }
 
   // Everything checked on every state: INV-01 … INV-08 and TP-01
@@ -564,14 +636,14 @@ module StatsFrameworkVerification {
     specInit
       .then(doStart)
       .then(doStoreStatsRecord("c1", "p1", 0))
-      .then(doStoreStatsRecord("c1", "p1", 0))
       .then(doStoreStatsRecord("c2", "p2", 0))
       .then(doStoreStatsRecord("c2", "p2", 0))
       .expect(and {
         lastResult == StoreStatsRecordResult(Dropped),
-        collected.length() == 3,
+        collected.length() == 2,
         dropped.get("c2") == 1,
         nextSeq.get("c2") == 1,
+        w01HolderFull,
         allProperties,
       })
 
@@ -602,8 +674,10 @@ module StatsFrameworkVerification {
     specInit
       .then(doStart)
       .then(doStoreStatsRecord("c1", "p1", -1))
-      .then(doStoreStatsRecord("c1", "p1", 11))
       .then(doStoreStatsRecord("c2", "p1", 10))
+      .then(doFetch)
+      .then(doFlush)
+      .then(doStoreStatsRecord("c1", "p1", 11))
       .then(doFetch)
       .then(doFlush)
       .expect(and {
@@ -651,27 +725,36 @@ module StatsFrameworkVerification {
         allProperties,
       })
 
-  // W-07 FlusherFull: repository outage fills processing (capacity 4); extra samples overflow
+  // W-07 FlusherFull: repository outage fills processing (capacity 3); extra samples overflow
   run flusherFullTest =
     specInit
       .then(doStart)
       .then(doSetRepositoryAvailable(false))
       .then(doStoreStatsRecord("c1", "p1", 5))
       .then(doStoreStatsRecord("c1", "p1", 5))
-      .then(doStoreStatsRecord("c1", "p1", 5))
       .then(doFetch)
       .then(doFlush)
-      .then(doStoreStatsRecord("c2", "p1", 5))
       .then(doStoreStatsRecord("c2", "p1", 5))
       .then(doStoreStatsRecord("c2", "p1", 5))
       .then(doFetch)
       .expect(and {
         lastResult == FetchResult({ ok: true, n: 1 }),
-        processing.length() == 4,
+        processing.length() == 3,
         collected.length() == 0,
-        overflowed.get("c2") == 2,
+        overflowed.get("c2") == 1,
+        w07FlusherFull,
         allProperties,
       })
+
+  // Flusher Conversion Rules: boundaries of isValid (TLC uses only 5 and 11)
+  pure def sampleWith(d: int): StatRecord = { collector: "c1", procedure: "p1", seq: 0, durationUs: d }
+  run isValidBoundariesTest =
+    specInit.expect(and {
+      not(isValid(sampleWith(-1))),
+      isValid(sampleWith(0)),
+      isValid(sampleWith(10)),
+      not(isValid(sampleWith(11))),
+    })
 
   // BG-04 Rejection: rejected operations report failure and change nothing
   run rejectionsTest =

@@ -338,9 +338,41 @@ must not appear in the implementation.
 
 ## Verification Only (not implementation behavior)
 - Model constants: `COLLECTORS = {"c1", "c2"}`, `PROCEDURES = {"p1", "p2"}`,
-  `HOLDER_CAPACITY = 3`, `FLUSHER_CAPACITY = 4`, `MAX_DURATION_US = 10`.
+  `HOLDER_CAPACITY = 2`, `FLUSHER_CAPACITY = 3`, `MAX_DURATION_US = 10`.
+  How they are chosen (the model must be as small as possible, but must still
+  show every threshold in the logic):
+  - **Sizes** (how many of something) are bounded just above every threshold
+    that appears in a guard or condition. `HOLDER_CAPACITY = 2` is enough to
+    reach "holder full"; `FLUSHER_CAPACITY = 3` is larger than the holder, so
+    that a `Fetch` can move only **part** of the collected samples (the case
+    between "all fit" and "none fit"). Two collectors are needed to see the
+    samples of different collectors interleave (per-collector counters,
+    INV-05); a third adds no new behavior. Larger values only add states.
+  - **Values** (what is passed) are reduced to their equivalence classes,
+    i.e. the classes the logic distinguishes. The procedure is never read by
+    the logic; the duration only matters relative to `0 ≤ d ≤ MAX_DURATION_US`.
+  (Earlier values `HOLDER_CAPACITY = 3`, `FLUSHER_CAPACITY = 4` showed the
+  same behavior with more states.)
 - Recorded durations come from a small domain that includes invalid values,
   for example `{-1, 0, 5, 10, 11}`, so that flusher filtering is visible in traces.
+- **Exhaustive verification uses tool-specific inputs.** Checking all states or
+  all paths with the full model values above is not feasible (the state space
+  is infinite because counters and `stored` grow without bound, and the number
+  of paths grows exponentially with their length; see conclusions.md). Each
+  tool therefore gets its own choice of inputs; the operations themselves are
+  the same:
+  - **TLC (all distinct states, any depth):** one procedure, durations
+    `{5, 11}` (one valid, one invalid), at most 4 accepted samples (the
+    minimum to overflow the flusher: fetch 2, collect 2 more, only 1 fits) and
+    at most 1 sample dropped by a full holder. These bounds make the state
+    space finite. They lose no behavior: the logic never branches on the value
+    of a counter, only on capacities, which the bounds exceed.
+  - **Apalache (all paths up to a given length):** any integer duration (the
+    solver itself finds the values that matter, e.g. the boundaries of
+    `0 ≤ d ≤ MAX_DURATION_US`), both procedures, length bounded by the number
+    of steps.
+  - The boundaries of the validity rule (-1, 0, 10, 11) are also checked by a
+    dedicated scenario test, because TLC uses only `{5, 11}`.
 - `SetRepositoryAvailable` is chosen nondeterministically so that write
   failures and retries appear in traces.
 - The simulation step is biased towards operations that can succeed, so that

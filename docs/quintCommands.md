@@ -9,7 +9,7 @@ end, in "Other quint parameters".
 |---|---|---|
 | `quint typecheck <file>` | Checks syntax, types and effects (e.g. that actions assign every variable) | After every change to the spec (workflow Phase 3, step 1) |
 | `quint run <file> --main=<module> --invariant=<inv>` | Simulator: generates random traces (`init`, then `step` repeatedly) and checks the named boolean `<inv>` in every visited state; stops and prints the trace if it is `false` (violation) | Everyday check of invariants and finding witnesses; fast, no Java, but only sampled traces (Phase 3, step 2) |
-| `quint verify <file> --main=<module> --invariant=<inv>` | Exhaustive model checking of **all** reachable states. Backend `apalache` (default; SMT solver, all executions up to `--max-steps`, also temporal formulas) or `tlc` (classic TLA+ model checker; the workflow uses `--backend=tlc`) | Before writing/accepting the implementation; the workflow does not continue until it reports no violation (Phase 3, step 3); slower, needs Java |
+| `quint verify <file> --main=<module> --invariant=<inv>` | Exhaustive model checking of **all** reachable states. Backend `apalache` (default; SMT solver, all executions up to `--max-steps`, also temporal formulas) or `tlc` (classic TLA+ model checker; the workflow uses `--backend=tlc`; ignores `--max-steps`). `--step=<action>` selects the step action (default `step`); for this spec the standard step does not finish, so tool-specific steps are used (see "5. Full verification") | Before writing/accepting the implementation; the workflow does not continue until it reports no violation (Phase 3, step 3); slower, needs Java |
 | `quint test <file> --main=<module>` | Runs the `run` definitions of the main module whose name ends with `Test` (default filter; other `run`s are skipped). Each test executes its `.then(...)` steps and fails if an `.expect(...)` is `false` or an action cannot execute.<br><br>Options:<br>`--match=<regex>` (select tests, e.g. `--match=flushRetriedTest`)<br>`--max-samples=<n>` (repetitions of randomized tests; 10000 by default, 1 with `--seed`)<br>`--verbosity=3` (show states)<br>`--out-itf=out_{test}_{seq}.itf.json` (save each test's trace) | To check concrete scenarios, like unit tests (Phase 3, step 4) |
 | `quint run <file> --main=<module> --mbt --n-traces=<k> --out-itf=<file>` | Without `--invariant` nothing is checked: only generates `k` random ITF/JSON traces (`out0…out<k-1>.itf.json`); `--mbt` adds which action was taken and with which arguments | To produce the traces replayed against the C++ implementation (Phase 5) |
 
@@ -94,17 +94,50 @@ quint run stats.qnt --main=StatsFrameworkVerification \
 
 ### 5. Full verification
 The gate from the workflow: do not continue until it reports no violation.
-Requires Java. Checks all states, not only randomly sampled ones.
+Requires Java. Checks all states (or all paths), not only randomly sampled
+ones.
+
+**Standard commands (as in the workflow document) — they should work, but do
+not finish for this spec in practical time:**
 ```bash
-# Apalache (default backend): all executions up to the given depth
+# Apalache (default backend): all paths up to the given length
 quint verify stats.qnt --main=StatsFrameworkVerification --invariant=allProperties --max-steps=10
 
-# TLC backend, as in the workflow document
+# TLC backend
 quint verify stats.qnt --main=StatsFrameworkVerification --invariant=allProperties --backend=tlc
 ```
-Caution for TLC: the counters (`nextSeq`, `dropped`, …) and `stored` grow
-without bound, so the state space is infinite; TLC may not terminate without
-an extra bound.
+Measured with the default `step` and the earlier model values (holder 3,
+flusher 4):
+- **Apalache, `--max-steps=10`:** step 3 ~34 s, step 4 ~4 min, step 5 > 2.5 h;
+  stopped after ~3 h at step 6 of 10. The number of paths grows exponentially
+  with their length.
+- **TLC:** never terminates. The counters (`nextSeq`, `dropped`, …) and
+  `stored` grow without bound, so the state space is infinite; after ~1 h:
+  depth 11, ~82 million distinct states, queue still growing. TLC **ignores
+  `--max-steps`**, and Quint passes no state bound to TLC (no `CONSTRAINT`,
+  `VIEW`, `SYMMETRY` or depth option; `--tlc-config` only sets heap, stack and
+  workers).
+
+**What is used instead: a separate step for each tool.** The module
+`StatsFrameworkVerification` defines `stepTlc` and `stepApalache`. They call
+the same spec actions as `step`, but choose the inputs each tool can handle
+(see "Verification Only" in statsDESIGN.md and conclusions.md). The step is
+selected with `--step`:
+```bash
+# TLC: all distinct states within the bounds (≤ 4 accepted samples, ≤ 1 dropped,
+# 1 procedure, durations {5, 11}), at any depth
+quint verify stats.qnt --main=StatsFrameworkVerification --backend=tlc \
+  --step=stepTlc --invariant=allProperties
+
+# Apalache: all paths up to N steps, with ANY integer duration
+quint verify stats.qnt --main=StatsFrameworkVerification \
+  --step=stepApalache --invariant=allProperties --max-steps=5
+```
+Measured (model values holder 2, flusher 3):
+- **TLC with `stepTlc`:** ~25 s, 1,401,775 distinct states (13.6 million
+  generated), complete state graph of depth 29, no violation.
+- **Apalache with `stepApalache`:** `--max-steps=4` ~76 s, `--max-steps=5`
+  ~5 min, no violation.
 
 ### 6. Generate many traces for MBT (Phase 5 of the workflow)
 Only from the verified spec.
@@ -116,7 +149,8 @@ quint run stats.qnt --main=StatsFrameworkVerification \
 Optionally add `--invariant=allProperties`, so that no generated trace passes
 through a state that breaks the invariants.
 
-Note: commands 5 and 6 have not been run yet.
+Note: the commands in step 5 have been run (results above); step 6 has not
+been run yet.
 
 ### Helpers (not steps)
 Used when analysing a failure or preparing a single MBT case.

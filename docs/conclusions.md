@@ -52,6 +52,7 @@ How they fit together:
    invariants need not be re-checked on the implementation; it is enough that
    the implementation matches the spec at every step.
 
+vtbnhcvkbiteind
 ### ⚠ Beware of low coverage: "no violation" is not enough
 A green `quint run --invariant=...` only says that **no violation was found in
 the traces that were explored**. It says nothing about **which situations those
@@ -147,6 +148,137 @@ When writing a witness:
   step where `overflowed` grows while the repository is unavailable.
 - **Look at the witness trace**, not only at "reached": it shows whether the
   scenario happened the way it was meant to.
+
+### ⚠ Exhaustive verification is not free, even for a small system
+The expectation was that Quint checks **all combinations**, so no corner case
+can be forgotten. In practice, even this small, single-threaded model (7
+operations; most with 0–1 arguments, one with 3 arguments of 2, 2 and 5
+values) could not be verified exhaustively at the depth suggested by the
+workflow document.
+
+**Paths vs. states**
+- **State:** one valuation of all variables (`state`, `collected`,
+  `processing`, `stored`, counters, `lastResult`, `ghost*`).
+- **Path (trace):** a sequence of steps from the initial state. Many paths
+  lead to the same state.
+
+This model has both problems:
+
+| Problem | Cause in this model | Size |
+|---|---|---|
+| **Many paths** | 27 different operations per step (`StoreStatsRecord` alone has 2 collectors × 2 procedures × 5 durations = 20 variants), all always possible | 27ᴺ paths of length N (10 steps ≈ 2 × 10¹⁴) |
+| **Many (infinitely many) states** | counters (`nextSeq`, `dropped`, …) and `stored` grow without bound; lists of samples with `seq` numbers, `lastResult` and `ghost*` multiply the combinations | unbounded |
+
+**How the tools deal with it**
+
+| | Apalache (`quint verify`, default) | TLC (`quint verify --backend=tlc`) | Simulator (`quint run`) |
+|---|---|---|---|
+| Method | symbolic, bounded by length: all paths of length ≤ N encoded as one formula for an SMT solver | explicit states: walks the state graph and expands every **distinct** state once | samples random paths |
+| Merges identical states? | no; the problem grows with N even if paths converge | yes; paths are never enumerated, only distinct states count | no |
+| Bounded by | `--max-steps` (length) | a condition on the state (e.g. counters ≤ 2); **ignores `--max-steps`** | `--max-steps`, `--max-samples` |
+| Cost grows with | number of paths: exponential in N | number of distinct states | number of samples |
+
+**Measured** (model values: 2 collectors, 2 procedures, 5 durations,
+holder 3, flusher 4; invariant `allProperties`):
+- **Apalache, `--max-steps=10`** (command from the workflow document): step 3
+  took ~34 s, step 4 ~4 min, step 5 > 2.5 h. **Stopped after ~3 h at step 6
+  of 10.**
+- **TLC, no state bound:** after ~1 h at depth 11: **~82 million distinct
+  states** (~486 million generated), ~3 million new distinct states per
+  minute, and the queue of unexplored states still growing (~74.5 million).
+  It never terminates, because the state space is infinite.
+- **Simulator, 10,000 traces × 30 steps:** ~1–2 s, but only sampled.
+
+So both kinds of explosion appear: Apalache suffers from the number of paths,
+TLC from the number of distinct states; and even bounded by depth 11 the number
+of distinct states is already tens of millions.
+
+**What could reduce it (not yet measured):**
+- smaller domains in the verification instance: the procedure does not affect
+  the logic (1 value is enough) and durations need only one valid and one
+  invalid value → 11 operations per step instead of 27 (boundaries of
+  `isValid` then need a separate small test);
+- for TLC: a state bound (e.g. ≤ 2 samples per collector), comparing states
+  without `lastResult` and `ghost*` (VIEW), symmetry `c1` ↔ `c2`;
+- cheaper invariants (INV-04, INV-05 compare every pair of samples);
+- an inductive invariant in Apalache (proof for any length in one step; needs
+  manual strengthening).
+
+**What was changed, and the result.** Only the verification module changed;
+the spec (`StatsFramework`) and the architecture stayed unbounded.
+1. **Smaller model sizes, chosen by a rule:** a size is bounded just above
+   every threshold that appears in the logic. Holder 2 (was 3) still reaches
+   "holder full"; flusher 3 (was 4) is still larger than the holder, so a
+   `Fetch` can move only part of the samples. This also raised simulation
+   coverage (W-01 15% → 32%, W-07 2% → 3%).
+2. **A separate step per tool** (`quint verify --step=...`), calling the same
+   spec actions as the simulation `step`:
+   - `stepTlc`: 1 procedure, durations `{5, 11}`, at most 4 accepted samples
+     and 1 sample dropped by a full holder. This makes the state space finite.
+     Counters can be bounded without losing behavior because the logic never
+     branches on their value (only on capacities, which the bounds exceed).
+   - `stepApalache`: any integer duration (`Int`); the SMT solver finds the
+     values that matter itself (a test showed it picks the boundary value
+     `MAX` without being told). Length bounded by `--max-steps`.
+   - Both list every operation once; guards and weights of the simulation
+     `step` only bias random choice and are useless for exhaustive tools.
+3. **A scenario test for the boundaries of `isValid`** (-1, 0, 10, 11),
+   because TLC uses only `{5, 11}`.
+
+| Run | Before | After |
+|---|---|---|
+| TLC | no bound: never terminates (~82 million distinct states after ~1 h) | `stepTlc`: **~25 s**, 1,401,775 distinct states, complete state graph of depth 29, no violation |
+| Apalache, 4 steps | ~4 min (step 4 of the `--max-steps=10` run) | `stepApalache`: **~76 s**, no violation |
+| Apalache, 5 steps | > 2.5 h for step 5 alone | `stepApalache`: **~5 min**, no violation |
+| Apalache, 10 steps | stopped after ~3 h at step 6 | not tried; TLC already covers all bounded states at any depth |
+
+**Values vs. sizes.** The reductions split into two kinds:
+- **Values** (what is passed, e.g. the duration): with Apalache they need not
+  be chosen by a human at all; a symbolic value (`Int`) lets the solver find
+  the significant values from the conditions in the logic. TLC and the
+  simulator need finite sets, chosen by equivalence classes.
+- **Sizes** (how many: collectors, capacities, samples, steps): must be
+  bounded for any finite check. The rule "just above every threshold in the
+  logic" makes the choice mechanical; a counter that no condition reads needs
+  no headroom at all.
+
+**Costs and limitations of this approach.**
+- **Complexity:** three steps (`step`, `stepTlc`, `stepApalache`) instead of
+  one, plus TLC-specific constants. The verification module becomes harder to
+  read, and each tool's inputs must be kept consistent with the spec. This is
+  a real drawback; it was accepted only because the standard command does not
+  finish.
+- **Quint's TLC integration is limited:** Quint generates the TLC
+  configuration with only `INIT`, `NEXT`, `INVARIANT` and `PROPERTY`, passes
+  fixed TLC arguments, and `--tlc-config` only sets heap, stack and workers.
+  State bounds (`CONSTRAINT`), `VIEW`, `SYMMETRY` and a depth limit (`-dfid`)
+  are not available, so the bound had to be written into the model
+  (`stepTlc`). Running TLC outside Quint (on the TLA+ produced by
+  `quint compile`) would allow them, at the cost of leaving Quint.
+- **Residual risk:** a bug that needs more than 4 samples, more than 2
+  collectors or larger capacities would not be found by TLC; no condition in
+  the logic requires such sizes, which is the argument that the risk is small.
+
+**The role of the human.** All the reductions above require human analysis
+(which values are equivalent, which data does not affect the logic). This is
+the same analysis as choosing equivalence classes for manual tests. What Quint
+still takes over is the harder part: **combinations and orderings of
+operations** and the **expected result** of every case (derived from the spec
+and the invariants). With few interactions between operations, as in this
+single-threaded framework, that gain is moderate and well-written unit /
+module tests could cover much of it. The gain grows with the number of
+interactions, above all with concurrency (Phase 2), where the combinations are
+practically impossible to enumerate by hand.
+
+**Conclusion:** exhaustive verification is not automatic. The model must be
+designed for verification (small domains, no data that does not affect the
+logic, bounded counters) and the tool chosen for the problem (TLC with a state
+bound for "all states", Apalache only for short paths). Otherwise even a small
+model explodes. With these choices the same spec went from "does not finish
+in hours" to ~25 s (TLC, all bounded states) and ~5 min (Apalache, 5 steps
+with any duration). In practice the assurance is layered: exhaustive checks of
+short or bounded executions, random simulation with measured coverage for long
+ones, and MBT for the implementation.
 
 ## 2. Design document (statsDESIGN.md)
 
@@ -438,7 +570,9 @@ StatsFramework:
 
 StatsFrameworkVerification:
 - Model constant values as `pure val MODEL_*`, plus small finite domains for
-  operation arguments (including invalid values).
+  operation arguments (including invalid values). Sizes (capacities, number
+  of identifiers) just above every threshold in the logic; values reduced to
+  the equivalence classes the logic distinguishes.
 - `action init = specInit`.
 - An `anyCall = any { ... }` action listing all `do*` actions (arguments
   chosen with `nondet x = SET.oneOf()`), whether or not they can succeed.
@@ -447,6 +581,15 @@ StatsFrameworkVerification:
   picked more often listed several times (weights); and one `anyCall` branch,
   so rejected calls still appear in traces. Guards here only choose test
   inputs; spec actions stay unguarded.
+- A `stepTlc = any { ... }` action for `quint verify --backend=tlc
+  --step=stepTlc`: each `do*` action once, reduced argument domains
+  (`TLC_*` constants), and a guard on every action that grows a counter, so
+  that counters stay within small bounds and the state space is finite.
+- A `stepApalache = any { ... }` action for `quint verify --step=stepApalache
+  --max-steps=N`: each `do*` action once, integer arguments taken from `Int`
+  (symbolic) instead of a finite set.
+- A scenario test for every boundary of a validity rule whose values are
+  reduced in `stepTlc`.
 - `val allProperties = safetyInvariant and <all tpNN...>`.
 - A `val` per witness W-xx, named `wNN<Name>`, with the scenario in POSITIVE
   form (true once it has happened), for `quint run --witnesses wNN<Name> ...`.
@@ -454,9 +597,11 @@ StatsFrameworkVerification:
 - A `run <name>Test` per witness plus one for rejections (BG-04), using
   `.then(...)` and `.expect(...)`; test names must end with `Test`.
 
-Validate: `quint typecheck`, `quint test`, and
+Validate: `quint typecheck`, `quint test`,
 `quint run --invariant=allProperties --witnesses <all wNN...>` (expect no
-violation and N > 0 for every witness; check that no witness is near 0%).
+violation and N > 0 for every witness; check that no witness is near 0%), and
+`quint verify` with `--step=stepTlc --backend=tlc` and with
+`--step=stepApalache` (expect no violation; report the run time).
 ```
 
 ### 3.4 Changes compared to the original example prompt
@@ -467,7 +612,7 @@ violation and N > 0 for every witness; check that no witness is near 0%).
 | One action per operation, with guards and primed assignments | yes | Rejections are observable behavior (BG-01, BG-04); with guards a rejected call never appears in a trace, so MBT would not test it. TP-01 needs operation logic it can call "on a copy", which only pure functions allow | Logic in pure `<op>Op` functions returning `Transition`; action `do<Op> = applyTransition(<op>Op(current))`, always enabled; failure recorded in `lastResult` |
 | An unchanged assignment for every variable NOT modified | yes (equivalent) | Follows from the previous row: one shared writer instead of per-action assignments | `applyTransition` assigns every variable; unmodified ones are carried over in `t.sys` |
 | A `val` per invariant named with its INV-ID | adjusted | Quint identifiers cannot contain `-`, so `INV-01` is not a valid name | `invNN<Name>` (e.g. `inv01BoundedCollected`) plus a comment with the exact ID |
-| `step = any { ... }` listing all non-init actions | kept, moved, extended | `step` chooses which calls to explore and with which arguments (small model domains): a verification concern, not behavior. A uniform choice among always-enabled actions gave low coverage | `step` in `StatsFrameworkVerification`, arguments chosen with `nondet ... oneOf()`; guarded and weighted branches plus one `anyCall` branch (all actions, unguarded) |
+| `step = any { ... }` listing all non-init actions | kept, moved, extended | `step` chooses which calls to explore and with which arguments (small model domains): a verification concern, not behavior. A uniform choice among always-enabled actions gave low coverage | `step` in `StatsFrameworkVerification`, arguments chosen with `nondet ... oneOf()`; guarded and weighted branches plus one `anyCall` branch (all actions, unguarded); additional `stepTlc` and `stepApalache` for exhaustive checking, because the standard `quint verify` with the simulation `step` did not finish |
 | Inline comments mapping elements to INV-IDs | kept, extended | Traceability for operations and witnesses too | Comments with section, operation name, owning component and INV/TP/BG/W IDs |
 | *(not in original)* | added | The design doc grew beyond the queue example | `lastResult`/`OpResult`, `ghost*` naming rule, temporal properties, witnesses as positive `val`s checked with `--witnesses`, scenario tests, "no implementation details" rule, validation commands |
 
