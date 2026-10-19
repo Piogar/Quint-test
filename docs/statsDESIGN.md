@@ -328,7 +328,10 @@ periodically. One tick triggers the flusher's `fetch()` and `flush()` and,
 while stopping, calls `finish()`. `tick()` is a convenience that only composes
 the spec operations above; it adds no behavior of its own. For model-based
 testing the test calls `fetch()`, `flush()` and `finish()` directly, one at a
-time, so that traces can be replayed deterministically.
+time, so that traces can be replayed deterministically. Traces may call them
+in any order, including orderings `tick()` never produces (e.g. two
+`fetch()` calls without a `flush()` in between); the implementation must
+behave as specified for every such ordering.
 
 Anything in the spec that is not listed here exists only for verification and
 must not appear in the implementation.
@@ -340,6 +343,15 @@ must not appear in the implementation.
   for example `{-1, 0, 5, 10, 11}`, so that flusher filtering is visible in traces.
 - `SetRepositoryAvailable` is chosen nondeterministically so that write
   failures and retries appear in traces.
+- The simulation step is biased towards operations that can succeed, so that
+  interesting situations are reached often (coverage): most choices are
+  guarded by the state in which the operation can succeed, some operations
+  are weighted (e.g. `StoreStatsRecord` chosen more often so that the holder
+  and the flusher fill up), and a share of choices is any operation in any
+  state, so rejected calls still appear in traces. This only selects test
+  inputs; it does not restrict the operations themselves.
+- Coverage is measured, not assumed: every witness must be reached in a
+  non-negligible share of simulated traces.
 - Trace length is bounded by the checker's step limit (for example
   `--max-steps=30`), not by a variable in the spec.
 - The spec may label the three `StoreStatsRecord` branches (accepted,
@@ -359,9 +371,11 @@ must not appear in the implementation.
     `c` while `repoAvailable = false` (W-07).
 
 ### Witnesses worth generating:
-Scenarios the spec must be able to reach. Each is checked by asking the
-simulator for a trace in which the condition holds; the trace is also replayed
-as a targeted MBT test.
+Scenarios the spec must be able to reach. Each condition below is stated in
+positive form (true once the scenario has happened). The simulator checks
+whether, and in how many traces, each scenario is reached (coverage). A trace
+leading to a scenario can be produced on demand; it can also be replayed as a
+targeted MBT test.
 - **W-01 HolderFull**: a sample is dropped because the holder is full
   (`dropped[c] > 0` for some `c`).
 - **W-02 FlushRetried**: a `Flush` returns failure while `Running` because the

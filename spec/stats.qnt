@@ -497,41 +497,46 @@ module StatsFrameworkVerification {
   //////////////////////////////////////////////////////////////////////////
   // Witnesses (design doc: Witnesses worth generating)
   //
-  // Each is the NEGATION of the scenario. Check it like an invariant:
-  // a violation means the scenario is reachable, and the violating trace
-  // is the witness (and a targeted MBT test).
+  // Each is the scenario in POSITIVE form: true in a state where the scenario
+  // has happened.
+  // - Is it reached, and how often? (coverage)
+  //     quint run ... --witnesses w01HolderFull ...
+  //   reports in how many traces each one became true (N > 0 = reached).
+  // - How was it reached? (trace, e.g. a targeted MBT case)
+  //     quint run ... --invariant='not(w07FlusherFull)' --mbt
+  //   the violation trace is the witness.
   //////////////////////////////////////////////////////////////////////////
 
   // W-01 HolderFull
   val w01HolderFull: bool =
-    not(MODEL_COLLECTORS.exists(c => dropped.get(c) > 0))
+    MODEL_COLLECTORS.exists(c => dropped.get(c) > 0)
 
   // W-02 FlushRetried
   val w02FlushRetried: bool =
-    not(ghostFlushFailedWhileRunning and lastResult == FlushResult(true))
+    ghostFlushFailedWhileRunning and lastResult == FlushResult(true)
 
   // W-03 InvalidDiscarded
   val w03InvalidDiscarded: bool =
-    not(MODEL_COLLECTORS.exists(c => discarded.get(c) > 0))
+    MODEL_COLLECTORS.exists(c => discarded.get(c) > 0)
 
   // W-04 StopWithRepositoryDown
   val w04StopWithRepositoryDown: bool =
-    not(MODEL_COLLECTORS.exists(c => lost.get(c) > 0) and state == Stopped)
+    MODEL_COLLECTORS.exists(c => lost.get(c) > 0) and state == Stopped
 
   // W-05 FullCycle
   val w05FullCycle: bool =
-    not(state == Stopped and stored.length() > 0)
+    state == Stopped and stored.length() > 0
 
   // W-06 StopDrainsToRepository
   val w06StopDrainsToRepository: bool =
-    not(ghostFlushedWhileStopping and state == Stopped and MODEL_COLLECTORS.forall(c => lost.get(c) == 0))
+    ghostFlushedWhileStopping and state == Stopped and MODEL_COLLECTORS.forall(c => lost.get(c) == 0)
 
   // W-07 FlusherFull: samples overflowed at Fetch while the repository was
   // unavailable (not merely any overflow: with new samples collected between
   // two Fetches and no Flush in between, processing can overflow even with a
   // working repository)
   val w07FlusherFull: bool =
-    not(ghostOverflowWhileRepoDown)
+    ghostOverflowWhileRepoDown
 
   //////////////////////////////////////////////////////////////////////////
   // Scenario tests (one per witness, plus rejections)

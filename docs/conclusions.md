@@ -298,6 +298,17 @@ Checks before finishing:
   leaves the state unchanged (or applies exactly the effect the doc lists)
   and records the failure in `lastResult`, so MBT traces include rejections
   (BG-01, BG-04).
+- **Operations are independent steps in any order.** The spec allows
+  orderings that the production orchestrator never produces: `tick()` always
+  calls `fetch()` and then `flush()`, but the spec also allows e.g. `Fetch,
+  Fetch` without a `Flush` in between (so `processing` can overflow even with
+  a working repository). Consequences: invariants are checked on more
+  behaviors than production can show, which makes them stronger (and the
+  framework stays correct even with a buggy orchestrator); witnesses must be
+  precise, otherwise the simulator reaches them through such an ordering (see
+  "A witness proves only what its condition says"); the C++ classes and the
+  MBT harness must accept these orderings too, because MBT calls `fetch()`,
+  `flush()` and `finish()` directly.
 - **Logic in pure functions, steps in actions** (see 3.2).
 - **`ghost*` variables** exist only for verification (e.g. history flags for
   witnesses that describe a sequence of events). They have no counterpart in
@@ -305,16 +316,16 @@ Checks before finishing:
 - **`step` belongs to verification.** It chooses which calls to explore and
   with which arguments (small model domains, including invalid values); the
   spec only defines what each call does.
-- **Witnesses are negated `val`s.** `quint run --invariant=wNN...` reports a
-  violation when the scenario is reachable; the trace is the witness and a
-  targeted MBT test. Consequence: with `--invariant`, a witness result is read
-  the other way round ("Invariant violated" = success, "No violation found" =
-  scenario not reached), while for real invariants a violation is a bug. To
-  avoid confusing the two, check invariants via `--invariant` and witnesses in
-  **positive** form via `--witnesses` (the run stays green and reports how many
-  traces reached each scenario, which also shows coverage). Commands and
-  details: [quintCommands.md](quintCommands.md), section "How to use
-  `--invariant` and `--witnesses`".
+- **Witnesses are `val`s in positive form** (`wNN<Name>`, true once the
+  scenario has happened). They are checked with `--witnesses`: the run stays
+  green and reports in how many traces each scenario was reached, which also
+  shows coverage. Invariants are checked with `--invariant` in the same run.
+  The trace of one witness (how it was reached, e.g. as a targeted MBT case)
+  is produced on demand with `--invariant='not(wNN<Name>)'`; there a violation
+  means success. Earlier the witnesses were written as negations, which made
+  `--invariant` results read the other way round and did not work with
+  `--witnesses`. Commands and details: [quintCommands.md](quintCommands.md),
+  section "How to use `--invariant` and `--witnesses`".
 - **Bounded temporal properties are state properties.** TP-01 is checked in
   every visited state by composing pure functions, not by a temporal formula.
 - **No implementation details in the spec.** No C++ class/method names or
@@ -429,18 +440,23 @@ StatsFrameworkVerification:
 - Model constant values as `pure val MODEL_*`, plus small finite domains for
   operation arguments (including invalid values).
 - `action init = specInit`.
-- A `step = any { ... }` action listing all `do*` actions, choosing arguments
-  with `nondet x = SET.oneOf()`.
+- An `anyCall = any { ... }` action listing all `do*` actions (arguments
+  chosen with `nondet x = SET.oneOf()`), whether or not they can succeed.
+- A `step = any { ... }` action with guarded branches (`all { guard, doX }`),
+  so that most steps are operations that can succeed; branches that should be
+  picked more often listed several times (weights); and one `anyCall` branch,
+  so rejected calls still appear in traces. Guards here only choose test
+  inputs; spec actions stay unguarded.
 - `val allProperties = safetyInvariant and <all tpNN...>`.
-- A `val` per witness W-xx, named `wNN<Name>`, written as the NEGATION of the
-  scenario, so `quint run --invariant=wNN<Name>` reports a violation when the
-  scenario is reachable (the trace is the witness).
+- A `val` per witness W-xx, named `wNN<Name>`, with the scenario in POSITIVE
+  form (true once it has happened), for `quint run --witnesses wNN<Name> ...`.
+  A trace of one witness is obtained with `--invariant='not(wNN<Name>)'`.
 - A `run <name>Test` per witness plus one for rejections (BG-04), using
   `.then(...)` and `.expect(...)`; test names must end with `Test`.
 
-Validate: `quint typecheck`, `quint test`, `quint run --invariant=allProperties`
-(expect no violation), and `quint run --invariant=wNN...` for each witness
-(expect a violation).
+Validate: `quint typecheck`, `quint test`, and
+`quint run --invariant=allProperties --witnesses <all wNN...>` (expect no
+violation and N > 0 for every witness; check that no witness is near 0%).
 ```
 
 ### 3.4 Changes compared to the original example prompt
@@ -451,6 +467,41 @@ Validate: `quint typecheck`, `quint test`, `quint run --invariant=allProperties`
 | One action per operation, with guards and primed assignments | yes | Rejections are observable behavior (BG-01, BG-04); with guards a rejected call never appears in a trace, so MBT would not test it. TP-01 needs operation logic it can call "on a copy", which only pure functions allow | Logic in pure `<op>Op` functions returning `Transition`; action `do<Op> = applyTransition(<op>Op(current))`, always enabled; failure recorded in `lastResult` |
 | An unchanged assignment for every variable NOT modified | yes (equivalent) | Follows from the previous row: one shared writer instead of per-action assignments | `applyTransition` assigns every variable; unmodified ones are carried over in `t.sys` |
 | A `val` per invariant named with its INV-ID | adjusted | Quint identifiers cannot contain `-`, so `INV-01` is not a valid name | `invNN<Name>` (e.g. `inv01BoundedCollected`) plus a comment with the exact ID |
-| `step = any { ... }` listing all non-init actions | kept, moved | `step` chooses which calls to explore and with which arguments (small model domains): a verification concern, not behavior | `step` in `StatsFrameworkVerification`, arguments chosen with `nondet ... oneOf()` |
+| `step = any { ... }` listing all non-init actions | kept, moved, extended | `step` chooses which calls to explore and with which arguments (small model domains): a verification concern, not behavior. A uniform choice among always-enabled actions gave low coverage | `step` in `StatsFrameworkVerification`, arguments chosen with `nondet ... oneOf()`; guarded and weighted branches plus one `anyCall` branch (all actions, unguarded) |
 | Inline comments mapping elements to INV-IDs | kept, extended | Traceability for operations and witnesses too | Comments with section, operation name, owning component and INV/TP/BG/W IDs |
-| *(not in original)* | added | The design doc grew beyond the queue example | `lastResult`/`OpResult`, `ghost*` naming rule, temporal properties, witnesses as negated `val`s, scenario tests, "no implementation details" rule, validation commands |
+| *(not in original)* | added | The design doc grew beyond the queue example | `lastResult`/`OpResult`, `ghost*` naming rule, temporal properties, witnesses as positive `val`s checked with `--witnesses`, scenario tests, "no implementation details" rule, validation commands |
+
+### 3.5 Limitation: witnesses cannot be grouped
+Invariants can be grouped into one `val` (`allProperties = safetyInvariant and
+tp01StopTerminates`) and passed to `--invariant` by a single name. **Witnesses
+cannot be grouped in a useful way**, so every witness has to be listed by
+name in `--witnesses`, and Quint itself does not fail when a witness is never
+reached (it only reports the count). There is no good solution for this.
+
+Why grouping does not work (measured, 10,000 traces):
+- `and { w01…w07 }` → **0%**: `and` requires all scenarios in the **same
+  state**, but they happen at different times and some exclude each other
+  (W-04 needs `lost > 0`, W-06 needs `lost = 0`).
+- `or { w01…w07 }` → 74.70%: only says that **some** scenario happened; a
+  witness that is never reached stays hidden.
+
+An invariant must hold in every state, so "all at once" is exactly what is
+wanted; a witness must happen at least once, each at its own time, so it needs
+its own result.
+
+Workarounds considered, all weak:
+- **List in a shell script / Makefile** (`WITNESSES=...`, plus a check that
+  every witness has N > 0): works, but the list lives outside the spec and
+  has to be kept in sync by hand.
+- **`.expect(wNN)` in each scenario test** (`quint test` then checks every
+  witness): deterministic and needs no list, but only proves reachability by
+  one hand-written path; it does not measure coverage, and the tests have to
+  be written per witness anyway.
+- **Latching `ghost` flags per witness and one group checked at the end of a
+  trace:** requires all scenarios in **one** trace (rare; W-04 and W-06
+  practically exclude each other) and adds a state variable per witness.
+
+Current state: the witness list is written in the command
+(`--witnesses w01HolderFull … w07FlusherFull`), and the result has to be read
+by eye (every witness N > 0). Be aware of it when adding a witness: it must
+also be added to the command.

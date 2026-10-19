@@ -23,13 +23,15 @@ Other useful options: `--seed` (reproduce a run), `--verbosity` (0–5),
 `--max-steps`, `--max-samples` (`run`).
 
 `<inv>` is the name of a boolean `val` from the spec (e.g. `allProperties`,
-`inv03Conservation` for invariants, `w01HolderFull` for witness) or an expression over such names; it is
-checked in every visited state. Details and examples: see
+`inv03Conservation`) or an expression over such names; it is checked in every
+visited state. Witnesses (e.g. `w01HolderFull`) are passed to
+`--witnesses` instead. Details and examples: see
 "How to use `--invariant` and `--witnesses`" near the end of this document.
 
-⚠ For a witness passed to `--invariant` (negated scenario, e.g.
-`w01HolderFull`), "Invariant violated" means **success**: the scenario was
-reached. See "Witnesses in `--invariant`: 'fail' means success" at the end.
+⚠ To get the trace of a witness, pass its negation to `--invariant`
+(e.g. `--invariant='not(w01HolderFull)'`); then "Invariant violated"
+means **success**: the scenario was reached. See "Witness traces: 'fail' means
+success" at the end.
 
 ## Commands for this spec
 
@@ -68,22 +70,26 @@ quint run stats.qnt --main=StatsFrameworkVerification \
 ```
 A single invariant: use its name, e.g. `--invariant=inv03Conservation`.
 
-### 4. Witnesses
-Confirm that the important scenarios are reachable at all. Run them before
-full verification: "no violation" means little if these situations never
-happen. Expected result: a violation; the printed trace is the witness.
+### 4. Witnesses (and coverage)
+Confirm that the important scenarios are reachable at all, and how often. Run
+them before full verification: "no violation" means little if these
+situations never happen. Invariants are checked in the same run.
 ```bash
-quint run stats.qnt --main=StatsFrameworkVerification --invariant=w01HolderFull --max-steps=30
+quint run stats.qnt --main=StatsFrameworkVerification --invariant=allProperties \
+  --max-steps=20 --max-samples=10000 \
+  --witnesses w01HolderFull w02FlushRetried w03InvalidDiscarded \
+              w04StopWithRepositoryDown w05FullCycle \
+              w06StopDrainsToRepository w07FlusherFull
 ```
-Others: `w02FlushRetried`, `w03InvalidDiscarded`, `w04StopWithRepositoryDown`,
-`w05FullCycle`, `w06StopDrainsToRepository`, `w07FlusherFull`.
+Expected result: "No violation found", and for every witness a line
+`... was witnessed in N trace(s) out of 10000 explored (x%)` with N > 0. A
+witness near 0% is effectively untested.
 
-All at once:
+Trace of one witness (how it was reached): pass its negation to `--invariant`.
+Expected result: a violation; the printed trace is the witness.
 ```bash
-for w in w01HolderFull w02FlushRetried w03InvalidDiscarded w04StopWithRepositoryDown \
-         w05FullCycle w06StopDrainsToRepository w07FlusherFull; do
-  echo "== $w"; quint run stats.qnt --main=StatsFrameworkVerification --invariant=$w --max-steps=30
-done
+quint run stats.qnt --main=StatsFrameworkVerification \
+  --invariant='not(w07FlusherFull)' --max-steps=30 --mbt
 ```
 
 ### 5. Full verification
@@ -117,10 +123,35 @@ Used when analysing a failure or preparing a single MBT case.
 
 Save a single trace to a file (ITF/JSON):
 ```bash
-quint run stats.qnt --main=StatsFrameworkVerification --invariant=w02FlushRetried \
+quint run stats.qnt --main=StatsFrameworkVerification --invariant='not(w02FlushRetried)' \
   --max-steps=30 --mbt --out-itf=w02FlushRetried.itf.json
 ```
 `--mbt` adds to the trace which action was taken and with which arguments.
+
+See how a witness was reached. With `--mbt` every state also shows
+`mbt::actionTaken` (the action) and `mbt::nondetPicks` (the chosen
+arguments):
+```bash
+# full trace
+quint run stats.qnt --main=StatsFrameworkVerification \
+  --invariant='not(w07FlusherFull)' --max-steps=30 --mbt
+
+# less noise: --hide needs fully qualified variable names
+P=StatsFrameworkVerification::StatsFramework
+quint run stats.qnt --main=StatsFrameworkVerification \
+  --invariant='not(w07FlusherFull)' --max-steps=30 --mbt \
+  --hide $P::discarded $P::dropped $P::lost $P::nextSeq \
+         $P::ghostFlushFailedWhileRunning $P::ghostFlushedWhileStopping
+
+# compact view: one line per step (action and arguments)
+quint run stats.qnt --main=StatsFrameworkVerification \
+  --invariant='not(w07FlusherFull)' --max-steps=30 --mbt 2>&1 \
+| grep -E '^\[State|actionTaken|nondetPicks' | paste - - - \
+| sed -E 's/mbt::(actionTaken|nondetPicks): //g; s/ +/ /g'
+```
+Look at the trace, not only at "reached": it shows whether the scenario
+happened the way it was meant to (see conclusions.md, "A witness proves only
+what its condition says").
 
 Reproduce a specific run (every `quint run` prints the seed it used):
 ```bash
@@ -144,11 +175,14 @@ how they are judged:
 In short: an invariant is "must always hold" (pass = never broken); a witness
 is "must happen" (pass = happened at least once).
 
-Our negated witnesses `w01…w07` passed to `--invariant` combine the two:
-`w07FlusherFull = not(scenario)` should be "always true" (the scenario never
-happens). When the scenario happens, it becomes `false` and Quint reports a
-violation, which for us is a success. That is why their result is read the
-other way round (see "Witnesses in `--invariant`: 'fail' means success" below).
+Our witnesses `w01…w07` are written in **positive** form (true once the
+scenario has happened), so they go to `--witnesses`. Passed directly to
+`--invariant` they would be `false` already in the initial state and give a
+useless violation. To get the trace of a witness, pass its **negation** to
+`--invariant`: `not(w07FlusherFull)` should be "always true" (the scenario
+never happens); when the scenario happens it becomes `false` and Quint reports
+a violation, which for us is a success (see "Witness traces: 'fail' means
+success" below).
 
 There is no special "invariant" keyword or registry in Quint: an invariant is
 just a `val ...: bool`. A "group" of invariants is also just a `val` that
@@ -165,11 +199,18 @@ val tp01StopTerminates: bool = ...
 
 // StatsFrameworkVerification – group: everything checked on every state
 val allProperties: bool = safetyInvariant and tp01StopTerminates
-// witnesses (negated scenarios)
-val w01HolderFull: bool = not(MODEL_COLLECTORS.exists(c => dropped.get(c) > 0))
+// witnesses (scenario in positive form)
+val w01HolderFull: bool = MODEL_COLLECTORS.exists(c => dropped.get(c) > 0)
 ```
 
-Names you can pass as `<inv>` in this spec:
+⚠ A group contains exactly what is written in its definition; Quint does not
+collect invariants automatically. A new invariant (e.g. `inv09…`) must also be
+added to `safetyInvariant`, otherwise `--invariant=allProperties` silently
+does not check it. (Witnesses cannot be grouped at all; see conclusions.md,
+3.5.)
+
+Names you can pass as `<inv>` (or, for witnesses, to `--witnesses`) in this
+spec:
 
 | `<inv>` | What is checked | Expected result |
 |---|---|---|
@@ -177,7 +218,8 @@ Names you can pass as `<inv>` in this spec:
 | `safetyInvariant` | INV-01…INV-08 | no violation |
 | `inv01BoundedCollected` … `inv08NonNegativeCounters` | one invariant | no violation |
 | `tp01StopTerminates` | TP-01 | no violation |
-| `w01HolderFull` … `w07FlusherFull` | one witness (negated scenario) | **violation** (the trace is the witness) |
+| `--witnesses w01HolderFull` … `w07FlusherFull` | one witness (scenario in positive form): in how many traces it happened | N > 0 for every witness |
+| `--invariant='not(w01HolderFull)'` … | trace of one witness | **violation** (the trace is the witness) |
 
 Examples (run from `stats_framework/spec`):
 ```bash
@@ -201,16 +243,15 @@ Notes:
   (error QNT501); use an expression with `and`, or `--invariants a b`.
 - If `--invariant` is omitted, it defaults to `true`, i.e. nothing is checked
   (as in the trace-generation command of Phase 5).
-- `quint run` also has `--witnesses a b`, which counts in how many traces each
-  named `val` becomes **true**. It expects the scenario in **positive** form;
-  our `w01…w07` are negated (true when the scenario is *not* reached), so
-  `--witnesses w01HolderFull` reports a meaningless 100%. To use
-  `--witnesses`, positive versions of the witnesses would have to be added.
+- `--witnesses a b` counts in how many traces each named `val` (or
+  expression) becomes **true**. It needs the scenario in **positive** form,
+  as our `w01…w07` are. A negated condition would be true already in the
+  initial state and always report a meaningless 100%.
 
-### ⚠ Witnesses in `--invariant`: "fail" means success
-`w01…w07` are written as the **negation** of the scenario (`not(...)`).
-Passed to `--invariant`, a `[violation] Found an issue` /
-`error: Invariant violated` (non-zero exit code) means the scenario **was
+### ⚠ Witness traces: "fail" means success
+To see **how** a witness was reached, pass its **negation** to `--invariant`
+(e.g. `--invariant='not(w07FlusherFull)'`). Then a `[violation] Found an issue`
+/ `error: Invariant violated` (non-zero exit code) means the scenario **was
 reached**; the printed trace shows how. `[ok] No violation found` means it was
 **not** reached (wrong condition or too few traces). This applies only to
 negated witnesses; for real invariants (`inv…`, `safetyInvariant`,
@@ -219,18 +260,19 @@ negated witnesses; for real invariants (`inv…`, `safetyInvariant`,
 | Passed to `--invariant` | "No violation found" | "Invariant violated" |
 |---|---|---|
 | invariant (`allProperties`, `inv…`) | ✅ correct | ❌ bug in the spec |
-| negated witness (`w01…w07`) | ❌ scenario not reached | ✅ scenario reached |
+| negated witness (`not(w01HolderFull)` …) | ❌ scenario not reached | ✅ scenario reached |
 
 To avoid confusing the two, keep them apart:
 - **invariants** via `--invariant`, expected result "No violation found";
-- **witnesses** via `--witnesses` with the scenario in **positive** form
-  (names or expressions). The run stays green and reports how many traces
-  reached each scenario (N > 0 = success), which also shows coverage:
+- **witnesses** via `--witnesses` (`w01…w07` are already in **positive**
+  form). The run stays green and reports how many traces reached each
+  scenario (N > 0 = success), which also shows coverage:
   ```bash
   quint run stats.qnt --main=StatsFrameworkVerification --invariant=allProperties \
     --max-steps=30 --max-samples=10000 \
-    --witnesses ghostOverflowWhileRepoDown 'MODEL_COLLECTORS.exists(c => dropped.get(c) > 0)'
+    --witnesses w01HolderFull w07FlusherFull
   ```
+- **witness traces** only when needed, via `--invariant='not(wNN...)'`.
 
 ## Other quint parameters
 Quint commands not used in the workflow document, but potentially useful.
