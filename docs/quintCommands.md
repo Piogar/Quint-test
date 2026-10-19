@@ -1,0 +1,249 @@
+# Quint commands for spec/stats.qnt
+
+## Commands used in the workflow
+The commands used in [Claude-Quint-C++.md](../../Claude-Quint-C++.md) (flags
+checked against `quint --help`, Quint 0.33). Other commands are listed at the
+end, in "Other quint parameters".
+
+| Command | What it does | When to use it |
+|---|---|---|
+| `quint typecheck <file>` | Checks syntax, types and effects (e.g. that actions assign every variable) | After every change to the spec (workflow Phase 3, step 1) |
+| `quint run <file> --main=<module> --invariant=<inv>` | Simulator: generates random traces (`init`, then `step` repeatedly) and checks the named boolean `<inv>` in every visited state; stops and prints the trace if it is `false` (violation) | Everyday check of invariants and finding witnesses; fast, no Java, but only sampled traces (Phase 3, step 2) |
+| `quint verify <file> --main=<module> --invariant=<inv>` | Exhaustive model checking of **all** reachable states. Backend `apalache` (default; SMT solver, all executions up to `--max-steps`, also temporal formulas) or `tlc` (classic TLA+ model checker; the workflow uses `--backend=tlc`) | Before writing/accepting the implementation; the workflow does not continue until it reports no violation (Phase 3, step 3); slower, needs Java |
+| `quint test <file> --main=<module>` | Runs the `run` definitions of the main module whose name ends with `Test` (default filter; other `run`s are skipped). Each test executes its `.then(...)` steps and fails if an `.expect(...)` is `false` or an action cannot execute.<br><br>Options:<br>`--match=<regex>` (select tests, e.g. `--match=flushRetriedTest`)<br>`--max-samples=<n>` (repetitions of randomized tests; 10000 by default, 1 with `--seed`)<br>`--verbosity=3` (show states)<br>`--out-itf=out_{test}_{seq}.itf.json` (save each test's trace) | To check concrete scenarios, like unit tests (Phase 3, step 4) |
+| `quint run <file> --main=<module> --mbt --n-traces=<k> --out-itf=<file>` | Without `--invariant` nothing is checked: only generates `k` random ITF/JSON traces (`out0…out<k-1>.itf.json`); `--mbt` adds which action was taken and with which arguments | To produce the traces replayed against the C++ implementation (Phase 5) |
+
+`--main=<module>` selects the module to run. Without it Quint looks for a
+module with the same name as the file (`stats` for `stats.qnt`), which does
+not exist here (error QNT405). For this spec always use
+`--main=StatsFrameworkVerification`. `typecheck` checks all modules and does
+not need it.
+
+Other useful options: `--seed` (reproduce a run), `--verbosity` (0–5),
+`--max-steps`, `--max-samples` (`run`).
+
+`<inv>` is the name of a boolean `val` from the spec (e.g. `allProperties`,
+`inv03Conservation` for invariants, `w01HolderFull` for witness) or an expression over such names; it is
+checked in every visited state. Details and examples: see
+"How to use `--invariant` and `--witnesses`" near the end of this document.
+
+⚠ For a witness passed to `--invariant` (negated scenario, e.g.
+`w01HolderFull`), "Invariant violated" means **success**: the scenario was
+reached. See "Witnesses in `--invariant`: 'fail' means success" at the end.
+
+## Commands for this spec
+
+Run all commands from the spec directory:
+
+```bash
+cd stats_framework/spec
+```
+
+`--main` must point to `StatsFrameworkVerification`. The `StatsFramework`
+module has unset constants and cannot be run on its own.
+
+Recommended order: from the cheapest check to the most expensive one; the spec
+is verified before traces for MBT are generated.
+
+### 1. Syntax and type check
+Cheapest check; run after every change.
+```bash
+quint typecheck stats.qnt
+```
+
+### 2. Scenario tests (`run ...Test`)
+Fast, concrete scenarios with a clear error message (which test, which
+`expect` failed).
+```bash
+quint test stats.qnt --main=StatsFrameworkVerification
+quint test stats.qnt --main=StatsFrameworkVerification --match=flushRetriedTest   # a single test
+quint test stats.qnt --main=StatsFrameworkVerification --verbosity=3              # show the steps
+```
+
+### 3. Simulation with invariants (INV-01…INV-08 and TP-01)
+Random traces. Expected result: no violation.
+```bash
+quint run stats.qnt --main=StatsFrameworkVerification \
+  --invariant=allProperties --max-steps=30 --max-samples=10000
+```
+A single invariant: use its name, e.g. `--invariant=inv03Conservation`.
+
+### 4. Witnesses
+Confirm that the important scenarios are reachable at all. Run them before
+full verification: "no violation" means little if these situations never
+happen. Expected result: a violation; the printed trace is the witness.
+```bash
+quint run stats.qnt --main=StatsFrameworkVerification --invariant=w01HolderFull --max-steps=30
+```
+Others: `w02FlushRetried`, `w03InvalidDiscarded`, `w04StopWithRepositoryDown`,
+`w05FullCycle`, `w06StopDrainsToRepository`, `w07FlusherFull`.
+
+All at once:
+```bash
+for w in w01HolderFull w02FlushRetried w03InvalidDiscarded w04StopWithRepositoryDown \
+         w05FullCycle w06StopDrainsToRepository w07FlusherFull; do
+  echo "== $w"; quint run stats.qnt --main=StatsFrameworkVerification --invariant=$w --max-steps=30
+done
+```
+
+### 5. Full verification
+The gate from the workflow: do not continue until it reports no violation.
+Requires Java. Checks all states, not only randomly sampled ones.
+```bash
+# Apalache (default backend): all executions up to the given depth
+quint verify stats.qnt --main=StatsFrameworkVerification --invariant=allProperties --max-steps=10
+
+# TLC backend, as in the workflow document
+quint verify stats.qnt --main=StatsFrameworkVerification --invariant=allProperties --backend=tlc
+```
+Caution for TLC: the counters (`nextSeq`, `dropped`, …) and `stored` grow
+without bound, so the state space is infinite; TLC may not terminate without
+an extra bound.
+
+### 6. Generate many traces for MBT (Phase 5 of the workflow)
+Only from the verified spec.
+```bash
+mkdir -p traces
+quint run stats.qnt --main=StatsFrameworkVerification \
+  --mbt --max-steps=30 --n-traces=500 --out-itf=traces/out.itf.json
+```
+Optionally add `--invariant=allProperties`, so that no generated trace passes
+through a state that breaks the invariants.
+
+Note: commands 5 and 6 have not been run yet.
+
+### Helpers (not steps)
+Used when analysing a failure or preparing a single MBT case.
+
+Save a single trace to a file (ITF/JSON):
+```bash
+quint run stats.qnt --main=StatsFrameworkVerification --invariant=w02FlushRetried \
+  --max-steps=30 --mbt --out-itf=w02FlushRetried.itf.json
+```
+`--mbt` adds to the trace which action was taken and with which arguments.
+
+Reproduce a specific run (every `quint run` prints the seed it used):
+```bash
+quint run stats.qnt --main=StatsFrameworkVerification --invariant=allProperties --seed=0x...
+```
+
+## How to use `--invariant` and `--witnesses` (what to put as `<inv>`)
+`<inv>` is the **name of a boolean `val`** defined in the spec (in the module
+given by `--main` or imported into it), or a boolean **expression** over such
+names. The simulator evaluates it in every visited state; if it is `false`,
+it stops and prints the trace that led there.
+
+Both invariants and witnesses are just boolean conditions; the flag decides
+how they are judged:
+
+| Flag | What Quint does with the condition | "Pass" |
+|---|---|---|
+| `--invariant=<cond>` | checks it in **every** state of every trace | the condition is **always true**; if it is `false` even once, Quint reports a violation |
+| `--witnesses <cond> ...` | checks whether the condition was true **at least once**, and counts in how many traces | the condition was true **at least once** (N > 0). Quint does not report an error here; "pass" is our reading of the count |
+
+In short: an invariant is "must always hold" (pass = never broken); a witness
+is "must happen" (pass = happened at least once).
+
+Our negated witnesses `w01…w07` passed to `--invariant` combine the two:
+`w07FlusherFull = not(scenario)` should be "always true" (the scenario never
+happens). When the scenario happens, it becomes `false` and Quint reports a
+violation, which for us is a success. That is why their result is read the
+other way round (see "Witnesses in `--invariant`: 'fail' means success" below).
+
+There is no special "invariant" keyword or registry in Quint: an invariant is
+just a `val ...: bool`. A "group" of invariants is also just a `val` that
+combines others with `and`. In `spec/stats.qnt`:
+
+```quint
+// StatsFramework – individual invariants
+val inv01BoundedCollected: bool = collected.length() <= HOLDER_CAPACITY
+val inv03Conservation: bool = ...
+// ...
+// group: INV-01 … INV-08
+val safetyInvariant: bool = and { inv01BoundedCollected, inv02BoundedProcessing, ... }
+val tp01StopTerminates: bool = ...
+
+// StatsFrameworkVerification – group: everything checked on every state
+val allProperties: bool = safetyInvariant and tp01StopTerminates
+// witnesses (negated scenarios)
+val w01HolderFull: bool = not(MODEL_COLLECTORS.exists(c => dropped.get(c) > 0))
+```
+
+Names you can pass as `<inv>` in this spec:
+
+| `<inv>` | What is checked | Expected result |
+|---|---|---|
+| `allProperties` | INV-01…INV-08 and TP-01 | no violation |
+| `safetyInvariant` | INV-01…INV-08 | no violation |
+| `inv01BoundedCollected` … `inv08NonNegativeCounters` | one invariant | no violation |
+| `tp01StopTerminates` | TP-01 | no violation |
+| `w01HolderFull` … `w07FlusherFull` | one witness (negated scenario) | **violation** (the trace is the witness) |
+
+Examples (run from `stats_framework/spec`):
+```bash
+# a group
+quint run stats.qnt --main=StatsFrameworkVerification --invariant=allProperties --max-steps=30
+
+# a single invariant
+quint run stats.qnt --main=StatsFrameworkVerification --invariant=inv03Conservation --max-steps=30
+
+# an expression combining names (quote it for the shell)
+quint run stats.qnt --main=StatsFrameworkVerification \
+  --invariant='inv01BoundedCollected and inv03Conservation' --max-steps=30
+
+# several names, reported separately (space-separated, no "=")
+quint run stats.qnt --main=StatsFrameworkVerification \
+  --invariants inv01BoundedCollected inv03Conservation tp01StopTerminates --max-steps=30
+```
+
+Notes:
+- A comma-separated list (`--invariant=a,b`) does **not** work in `quint run`
+  (error QNT501); use an expression with `and`, or `--invariants a b`.
+- If `--invariant` is omitted, it defaults to `true`, i.e. nothing is checked
+  (as in the trace-generation command of Phase 5).
+- `quint run` also has `--witnesses a b`, which counts in how many traces each
+  named `val` becomes **true**. It expects the scenario in **positive** form;
+  our `w01…w07` are negated (true when the scenario is *not* reached), so
+  `--witnesses w01HolderFull` reports a meaningless 100%. To use
+  `--witnesses`, positive versions of the witnesses would have to be added.
+
+### ⚠ Witnesses in `--invariant`: "fail" means success
+`w01…w07` are written as the **negation** of the scenario (`not(...)`).
+Passed to `--invariant`, a `[violation] Found an issue` /
+`error: Invariant violated` (non-zero exit code) means the scenario **was
+reached**; the printed trace shows how. `[ok] No violation found` means it was
+**not** reached (wrong condition or too few traces). This applies only to
+negated witnesses; for real invariants (`inv…`, `safetyInvariant`,
+`allProperties`) a violation is a real bug.
+
+| Passed to `--invariant` | "No violation found" | "Invariant violated" |
+|---|---|---|
+| invariant (`allProperties`, `inv…`) | ✅ correct | ❌ bug in the spec |
+| negated witness (`w01…w07`) | ❌ scenario not reached | ✅ scenario reached |
+
+To avoid confusing the two, keep them apart:
+- **invariants** via `--invariant`, expected result "No violation found";
+- **witnesses** via `--witnesses` with the scenario in **positive** form
+  (names or expressions). The run stays green and reports how many traces
+  reached each scenario (N > 0 = success), which also shows coverage:
+  ```bash
+  quint run stats.qnt --main=StatsFrameworkVerification --invariant=allProperties \
+    --max-steps=30 --max-samples=10000 \
+    --witnesses ghostOverflowWhileRepoDown 'MODEL_COLLECTORS.exists(c => dropped.get(c) > 0)'
+  ```
+
+## Other quint parameters
+Quint commands not used in the workflow document, but potentially useful.
+
+| Command | What it does | When to use it |
+|---|---|---|
+| `quint parse <file>` | Checks syntax only (no types) | Rarely; `typecheck` already includes it |
+| `quint repl` / `quint -r <file>::<module>` | Interactive Read-Evaluate-Print-Loop: evaluate expressions and execute actions by hand | Exploring and debugging the spec step by step |
+| `quint compile <file>` | Translates the spec to another format (e.g. TLA+ or JSON), written to stdout | Integration with other tools (e.g. TLA+ tooling) |
+| `quint docs <file>` | Generates documentation from `///` docstrings | Producing reference docs of the spec |
+
+REPL for this spec (not run yet):
+```bash
+quint -r stats.qnt::StatsFrameworkVerification
+# then e.g.: init  →  doStart  →  doStoreStatsRecord("c1","p1",5)  →  collected
+```
