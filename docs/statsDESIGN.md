@@ -301,9 +301,10 @@ Termination of shutdown is a temporal property and is checked on the spec
 ## Spec to Implementation Mapping (C++)
 | Spec element                 | Implementation element |
 |------------------------------|------------------------|
+| `CollectorId`, `ProcedureId` | `using CollectorId = std::string;`, `using ProcedureId = std::string;` (the same string values as in the traces, e.g. `"c1"`, `"p1"`) |
 | `state`                      | `StatsOrchestrator::state()` returning `enum class OrchestratorState { Stopped, Running, Stopping }` |
-| `collected`                  | bounded sample sequence inside `StatsHolder`; read-only snapshot via `StatsHolder::collectedSnapshot()` |
-| `processing`                 | samples currently held by `StatsFlusher`; read-only snapshot via `StatsFlusher::processingSnapshot()` |
+| `collected`                  | bounded sample sequence inside `StatsHolder` (private); read by tests only, through `StatsTestAccess` |
+| `processing`                 | samples currently held by `StatsFlusher` (private); read by tests only, through `StatsTestAccess` |
 | `stored`                     | contents of the `IStatsRepository` implementation (DB adapter in production, in-memory fake in tests); read-only snapshot via the fake |
 | `repoAvailable`              | availability of the `IStatsRepository`; `write()` returns `false` when unavailable |
 | `nextSeq[c]`                 | sequence counter inside `StatsCollector` instance `c` |
@@ -311,15 +312,15 @@ Termination of shutdown is a temporal property and is checked on the spec
 | `overflowed[c]`              | per-collector counter exposed by `StatsFlusher::overflowed(c)` |
 | `discarded[c]`               | per-collector counter exposed by `StatsFlusher::discarded(c)` |
 | `lost[c]`                    | per-collector counter exposed by `StatsFlusher::lost(c)` |
-| `StatRecord`                 | `struct StatRecord` |
+| `StatRecord`                 | `struct StatRecord { CollectorId collector; ProcedureId procedure; int64_t seq; int64_t durationUs; }` |
 | `COLLECTORS`                 | `StatsCollector` instances, each with a `CollectorId`, writing to a shared `StatsHolder` |
 | `PROCEDURES`                 | `ProcedureId` values passed to `StatsCollector::storeStatsRecord` |
 | `HOLDER_CAPACITY`, `FLUSHER_CAPACITY`, `MAX_DURATION_US` | fields of `StatsConfig` used to construct `StatsHolder` and `StatsFlusher` |
 | Start / Stop                 | `bool StatsOrchestrator::start()` / `bool StatsOrchestrator::stop()` |
-| StoreStatsRecord(c, p, d)    | `void StatsCollector::storeStatsRecord(ProcedureId p, int64_t durationUs)` on collector `c`, appending to `StatsHolder` |
+| StoreStatsRecord(c, p, d)    | `void StatsCollector::storeStatsRecord(ProcedureId p, int64_t durationUs)` on collector `c`, appending to `StatsHolder`; the holder ignores it when not accepting (see "Who checks that the orchestrator is running") |
 | Fetch                        | `std::optional<size_t> StatsFlusher::fetch()` taking all collected samples from `StatsHolder` |
 | Flush                        | `bool StatsFlusher::flush()` calling `convert()` then `IStatsRepository::write()` |
-| Finish                       | `bool StatsOrchestrator::finish()` |
+| Finish                       | `bool StatsOrchestrator::finish()`, public (the application may call it; `tick()` calls it while stopping; MBT calls it directly) |
 | Flusher conversion rules     | `std::vector<StatRecord> StatsFlusher::convert(const std::vector<StatRecord>&)` plus invalid count |
 | SetRepositoryAvailable(b)    | `setAvailable(b)` on the in-memory fake repository (test only) |
 
@@ -335,6 +336,50 @@ behave as specified for every such ordering.
 
 Anything in the spec that is not listed here exists only for verification and
 must not appear in the implementation.
+
+### Who checks that the orchestrator is running
+`StoreStatsRecord` is ignored when `state ≠ Running` (design: "Rejected
+(ignored)"; BG-06, INV-07 depend on it). The collector does **not** know or
+call the orchestrator; it only appends to the `StatsHolder`. The check is in
+the holder, and the orchestrator drives it:
+- `StatsHolder::setAccepting(bool)`: `StatsOrchestrator::start()` sets it to
+  `true` on success, `StatsOrchestrator::stop()` sets it to `false` on
+  success. Initially `false`.
+- `StatsHolder` ignores a sample when not accepting (no change at all, the
+  collector's sequence counter is not incremented either).
+- Hence "holder accepting" ⇔ `state = Running` at all times; the spec state
+  `state` stays owned by the orchestrator.
+- The collector learns the outcome from the holder (accepted / ignored /
+  dropped) only to decide whether to increment its sequence counter; the
+  outcome is not returned to the caller of `storeStatsRecord`.
+
+Dependencies: collector → holder, orchestrator → holder, orchestrator →
+flusher, flusher → holder and repository. No component depends on the
+collector, and the collector depends on nothing but the holder.
+
+### Visibility of accessors
+| Accessor | Visibility | Why |
+|---|---|---|
+| `StatsOrchestrator::state()` | public | the application checks whether shutdown completed |
+| `StatsHolder::collectedCount()`, `StatsHolder::dropped(c)` | public | health metrics and monitoring |
+| `StatsFlusher::processingCount()`, `overflowed(c)`, `discarded(c)`, `lost(c)` | public | health metrics and monitoring |
+| contents of `collected` and `processing` | **test only**, via `StatsTestAccess` | MBT compares them after every step (BG-02); production must not see the samples inside the holder and the flusher |
+| `StatsHolder::setAccepting(bool)` | public, but called only by `StatsOrchestrator` (`start()`, `stop()`) | internal wiring; applications must not call it |
+| `setAvailable(b)` | test only | exists only on the in-memory fake repository |
+
+Test access: `StatsHolder` and `StatsFlusher` declare
+`friend class StatsTestAccess;`. `StatsTestAccess` is defined only in
+`tests/` and returns read-only copies of the private sample sequences. The
+production code contains only the `friend` declaration, and the production and
+test builds are the same.
+
+### Build and layout
+- C++17, built with CMake.
+- Production sources (`.h` and `.cpp`): `stats_framework/src/`.
+- Tests (unit tests, `StatsTestAccess`, in-memory fake repository, MBT
+  harness): `stats_framework/tests/`, using GoogleTest; the MBT harness reads
+  ITF traces with nlohmann/json.
+- Traces: `stats_framework/traces/` (generated by `scripts/gen_traces.sh`).
 
 ## Verification Only (not implementation behavior)
 - Model constants: `COLLECTORS = {"c1", "c2"}`, `PROCEDURES = {"p1", "p2"}`,

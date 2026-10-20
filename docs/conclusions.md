@@ -329,21 +329,18 @@ inside the holder or the flusher. Making them public would expose internals to
 every class.
 
 #### Ways to overcome it
-1. **Friend test-access class (preferred).** e.g. `StatsHolder` declares
-   `friend class StatsHolderTestAccess;`; that class exists only in the test
-   code and reads the private data. Production API stays clean, no
-   build-specific code; cost is one `friend` line per class.
-2. **Protected members + test subclass.** Works, but forces `protected` where
-   `private` would be enough.
-3. **`#ifdef TESTING` accessors.** Production build differs from the tested
-   build. Avoid.
-4. **No snapshots; observe only through public behavior.** MBT checks only
-   counts, counters and `stored` (via the fake repository). Weaker: e.g. an
-   ordering bug in `collected` is detected only after the next `Flush`.
+| Option | How it looks | Pros | Cons |
+|---|---|---|---|
+| **A. Friend test-access class** | `StatsHolder` and `StatsFlusher` declare `friend class StatsTestAccess;`. `StatsTestAccess` exists only in `tests/` and reads the private data | public API stays clean; the same build for production and tests; cost: one `friend` line per class | production code "knows" the name of a test class (only the name, no code) |
+| **B. `protected` members + test subclass** | members `protected`; in tests `class TestableHolder : public StatsHolder` with read methods | no mention of tests in production code | forces `protected` where `private` would be enough; tests must create subclasses instead of the real objects |
+| **C. `#ifdef TESTING` accessors** | snapshot methods compiled only in the test build | simple | **the tested build differs from the production build**; avoid |
+| **D. No snapshots** | MBT compares only counters, sizes and the repository contents (via the fake) | no extra access at all | weaker: e.g. a wrong order in the holder is detected only after the next `Flush` |
 
-**Direction:** keep `state()`, counts and counters public; give tests access
-to the snapshots only through a friend test-access class. Not yet reflected in
-the mapping section of `statsDESIGN.md`.
+**Decision (for now): A.** Keep `state()`, counts and counters public; give
+tests access to the snapshots only through `StatsTestAccess`, declared as a
+friend of `StatsHolder` and `StatsFlusher`. `StatsOrchestrator::finish()` is
+public (the application may call it; MBT calls it directly), so it needs no
+special access.
 
 ### 2.4 Prompt for writing the design document
 Produces (or reviews) a design document that follows the rules in 1 and 2.1–2.3
@@ -656,9 +653,77 @@ Current state: the witness list is written in the command
 by eye (every witness N > 0). Be aware of it when adding a witness: it must
 also be added to the command.
 
-## 4. MBT harness (C++)
+## 4. C++ implementation
 
-### 4.1 Notes for the harness prompt (to be written in Phase 6)
+### 4.1 Prompt for generating the C++ code
+Produces the implementation (Phase 4 of the workflow) from the design document
+and the spec. The MBT harness is a separate step (see 5).
+
+```
+Generate the C++ implementation of the stats framework in stats_framework/.
+
+Sources of truth:
+- docs/statsDESIGN.md: "Operations", "Flusher Conversion Rules", "Queries"
+  and "Spec to Implementation Mapping (C++)" (names, signatures, visibility,
+  build and layout);
+- spec/stats.qnt, module StatsFramework: the exact behavior of every
+  "Succeeds when / Rejected when" branch (pure functions <op>Op).
+Do NOT implement anything from "Verification Only" or from the module
+StatsFrameworkVerification: no ghost variables, no stored lastResult, no
+step actions, no witnesses, no model constants.
+
+Build and layout:
+- C++17, CMake (CMakeLists.txt in stats_framework/); library target from
+  src/, test executable from tests/.
+- src/: one .h and one .cpp per class; shared types (CollectorId,
+  ProcedureId, StatRecord, OrchestratorState, StatsConfig) in one header;
+  IStatsRepository as an interface header.
+- tests/: GoogleTest (via CMake FetchContent), the in-memory fake repository
+  with setAvailable(b), StatsTestAccess.
+
+API: exactly as in the mapping table (class and method names, signatures,
+return types, public vs. test-only). In particular:
+- start(), stop(), finish(), flush() return bool (success / rejected);
+  finish() is public;
+- storeStatsRecord() returns void (fire-and-forget);
+- fetch() returns std::optional<size_t>: std::nullopt when rejected, the
+  number of samples moved to processing (may be 0) on success;
+- tick() calls fetch(), flush() and, while stopping, finish(); it adds no
+  behavior of its own.
+
+Behavior: implement every branch of every operation exactly as in the design
+doc (same conditions, same effects). A rejected operation changes nothing
+except the effect its branch lists. Operations may be called in any order
+(MBT calls fetch(), flush() and finish() directly), so no method may assume
+the order used by tick().
+
+Encapsulation: all data members private. Only the accessors listed as public
+in "Visibility of accessors" are public. StatsHolder and StatsFlusher declare
+`friend class StatsTestAccess;`; this declaration is the only test-related
+code allowed in src/. Rejections are return values, not exceptions.
+
+The "not running" check of StoreStatsRecord is in the holder, driven by the
+orchestrator, as described in "Who checks that the orchestrator is running":
+the collector depends only on the holder and never on the orchestrator.
+
+Where the design doc leaves any other choice, choose the simplest solution
+that keeps the operations independent, and state the choice in a comment.
+
+Comments: each operation cites its design-doc operation and branch (e.g.
+"// Operation: Fetch — Rejected when ..."), and each counter its design-doc
+state variable.
+
+Tests in this step: GoogleTest unit tests for the success and every
+rejection branch of each operation (mirroring the scenario tests in
+spec/stats.qnt), and one test that tick() behaves like fetch(), flush()
+(and finish() while stopping).
+
+Validate: configure and build with CMake, run the unit tests; all must pass.
+```
+
+## 5. MBT harness (C++)
+
+### 5.1 Notes for the harness prompt (to be written in Phase 6)
 Found while inspecting traces generated with
 `quint run --mbt --out-itf=...`. The prompt for generating the C++ MBT harness
 must make the harness handle these points:
