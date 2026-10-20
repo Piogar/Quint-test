@@ -52,7 +52,6 @@ How they fit together:
    invariants need not be re-checked on the implementation; it is enough that
    the implementation matches the spec at every step.
 
-vtbnhcvkbiteind
 ### ⚠ Beware of low coverage: "no violation" is not enough
 A green `quint run --invariant=...` only says that **no violation was found in
 the traces that were explored**. It says nothing about **which situations those
@@ -588,6 +587,12 @@ StatsFrameworkVerification:
 - A `stepApalache = any { ... }` action for `quint verify --step=stepApalache
   --max-steps=N`: each `do*` action once, integer arguments taken from `Int`
   (symbolic) instead of a finite set.
+- Naming rule for all steps (`anyCall`, `step`, `stepTlc`, `stepApalache`):
+  every branch calls exactly one `do<Op>` action, with arguments chosen by
+  `nondet` inline in the branch, not in a separately named helper action.
+  `quint run --mbt` records the name of the action chosen in the step as
+  `mbt::actionTaken`; with this rule traces contain only `do<Op>` names, which
+  map 1:1 to the operations of the design doc.
 - A scenario test for every boundary of a validity rule whose values are
   reduced in `stepTlc`.
 - `val allProperties = safetyInvariant and <all tpNN...>`.
@@ -650,3 +655,46 @@ Current state: the witness list is written in the command
 (`--witnesses w01HolderFull … w07FlusherFull`), and the result has to be read
 by eye (every witness N > 0). Be aware of it when adding a witness: it must
 also be added to the command.
+
+## 4. MBT harness (C++)
+
+### 4.1 Notes for the harness prompt (to be written in Phase 6)
+Found while inspecting traces generated with
+`quint run --mbt --out-itf=...`. The prompt for generating the C++ MBT harness
+must make the harness handle these points:
+- **Variable names are fully qualified** with the module path, e.g.
+  `StatsFrameworkVerification::StatsFramework::collected`. The harness strips
+  the prefix (everything up to the last `::`) before mapping a variable to its
+  C++ accessor.
+- **Verification-only data is not compared:** all `ghost*` variables, and in
+  `lastResult` the label `StoreStatsRecordResult(...)` (the C++ method returns
+  `void`). The other `lastResult` variants are compared with the value
+  returned by the C++ method (BG-01).
+- **Which operation to call:** `mbt::actionTaken` holds the `do<Op>` name of
+  the step (`init` for the initial state), and `mbt::nondetPicks` holds its
+  arguments (`c`, `p`, `d` for `doStoreStatsRecord`, `b` for
+  `doSetRepositoryAvailable`; unused ones are `None`). Each name maps to one
+  C++ method according to "Spec to Implementation Mapping (C++)" in
+  statsDESIGN.md.
+- **ITF value encoding:** sum types as `{"tag": "...", "value": ...}` (e.g.
+  `{"tag": "FlushResult", "value": false}`, `Option` picks as
+  `{"tag": "Some", "value": ...}` / `{"tag": "None", ...}`), maps as
+  `{"#map": [[key, value], ...]}`, tuples as `{"#tup": [...]}`, large
+  integers as `{"#bigint": "..."}`, lists as JSON arrays, records as JSON
+  objects.
+- **Any order of operations:** traces may call `fetch()`, `flush()` and
+  `finish()` in orderings `tick()` never produces (e.g. two `fetch()` without
+  a `flush()`); the harness calls them directly, one per trace step.
+- **Repository availability** (`doSetRepositoryAvailable`) is driven through
+  the in-memory fake repository (`setAvailable(b)`), not through the
+  framework.
+
+Trace generation (`scripts/gen_traces.sh`): 500 random traces × 30 steps (as
+in the workflow document) plus one targeted trace per witness
+(`--invariant='not(wNN...)' --mbt`), so that rare scenarios (W-02, W-07: ~3% of
+random traces) are certainly replayed. Traces are test cases and are committed
+to the repository, so the script makes them reproducible: fixed seed, and
+`#meta` normalized (creation time removed, absolute spec path made relative),
+because otherwise every regeneration changes every file. Witness traces carry
+`"status": "violation"` in `#meta`; for the harness this means "scenario
+reached", not a failure.

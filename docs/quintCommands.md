@@ -139,18 +139,41 @@ Measured (model values holder 2, flusher 3):
 - **Apalache with `stepApalache`:** `--max-steps=4` ~76 s, `--max-steps=5`
   ~5 min, no violation.
 
-### 6. Generate many traces for MBT (Phase 5 of the workflow)
-Only from the verified spec.
+### 6. Generate traces for MBT (Phase 5 of the workflow)
+Only from the verified spec. Run the script (from any directory):
 ```bash
-mkdir -p traces
-quint run stats.qnt --main=StatsFrameworkVerification \
-  --mbt --max-steps=30 --n-traces=500 --out-itf=traces/out.itf.json
+./scripts/gen_traces.sh
 ```
-Optionally add `--invariant=allProperties`, so that no generated trace passes
-through a state that breaks the invariants.
+It produces:
+- `traces/random/trace0.itf.json … trace499.itf.json`: 500 random traces ×
+  30 steps, generated with `--invariant=allProperties` (the run fails if any
+  trace breaks an invariant);
+- `traces/witness/wNN<Name>.itf.json`: one targeted trace per witness W-01 …
+  W-07 (`--invariant='not(wNN...)'`, up to 10,000 attempts). The script fails
+  if a witness is not reached. These files have `"status": "violation"` in
+  `#meta`, which only means "scenario reached", not an error.
 
-Note: the commands in step 5 have been run (results above); step 6 has not
-been run yet.
+Details of the script:
+- **Fixed seed** (`--seed`), so the same spec always gives the same traces.
+  With `--seed`, Quint sets `--max-samples` to 1 by default, so the script
+  sets it explicitly (500 for random traces, 10,000 for witnesses).
+- **Normalized metadata:** Quint writes the creation time and the absolute path
+  of the spec into `#meta`; the script removes the time and makes the path
+  relative (`jq`). Regenerating from an unchanged spec gives byte-identical
+  files on any machine.
+- **Traces are test cases and are committed** (~25 MB). Run the script again
+  after every change to the spec and commit the result.
+
+Measured: ~20 s for all 507 files.
+
+Single command for the random traces, without the script:
+```bash
+quint run stats.qnt --main=StatsFrameworkVerification --invariant=allProperties --mbt \
+  --max-steps=30 --max-samples=500 --n-traces=500 --seed=0x5747a75 \
+  --out-itf=../traces/random/trace.itf.json
+```
+
+Note: all commands in steps 1–6 have been run.
 
 ### Helpers (not steps)
 Used when analysing a failure or preparing a single MBT case.

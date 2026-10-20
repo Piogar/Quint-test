@@ -470,28 +470,30 @@ module StatsFrameworkVerification {
 
   action init = specInit
 
-  action storeAnySample = {
-    nondet c = MODEL_COLLECTORS.oneOf()
-    nondet p = MODEL_PROCEDURES.oneOf()
-    nondet d = MODEL_DURATIONS.oneOf()
-    doStoreStatsRecord(c, p, d)
-  }
-
-  action setAnyRepositoryAvailability = {
-    nondet b = Set(true, false).oneOf()
-    doSetRepositoryAvailable(b)
-  }
+  // Naming rule for all steps below: every branch calls exactly one `do<Op>`
+  // action, and arguments are chosen with `nondet` inline in the branch (not
+  // in a separately named helper action). `quint run --mbt` records the name
+  // of the action chosen in the step as `mbt::actionTaken`, so traces then
+  // contain only `do<Op>` names, which map 1:1 to the operations.
 
   // Any operation, whether or not it can succeed. Keeps rejected calls in
   // traces, so MBT still checks rejections (BG-01, BG-04).
   action anyCall = any {
     doStart,
-    storeAnySample,
+    {
+      nondet c = MODEL_COLLECTORS.oneOf()
+      nondet p = MODEL_PROCEDURES.oneOf()
+      nondet d = MODEL_DURATIONS.oneOf()
+      doStoreStatsRecord(c, p, d)
+    },
     doFetch,
     doFlush,
     doStop,
     doFinish,
-    setAnyRepositoryAvailability,
+    {
+      nondet b = Set(true, false).oneOf()
+      doSetRepositoryAvailable(b)
+    },
   }
 
   // Simulation step. The simulator picks uniformly among the branches whose
@@ -505,13 +507,26 @@ module StatsFrameworkVerification {
   // Guards here only choose test inputs; the spec actions are unchanged.
   action step = any {
     all { state == Stopped, doStart },
-    all { state == Running, storeAnySample },
-    all { state == Running, storeAnySample },
+    {
+      nondet c = MODEL_COLLECTORS.oneOf()
+      nondet p = MODEL_PROCEDURES.oneOf()
+      nondet d = MODEL_DURATIONS.oneOf()
+      all { state == Running, doStoreStatsRecord(c, p, d) }
+    },
+    {
+      nondet c = MODEL_COLLECTORS.oneOf()
+      nondet p = MODEL_PROCEDURES.oneOf()
+      nondet d = MODEL_DURATIONS.oneOf()
+      all { state == Running, doStoreStatsRecord(c, p, d) }
+    },
     all { state != Stopped, collected.length() > 0, doFetch },
     all { processing.length() > 0, doFlush },
     all { state == Running, doStop },
     all { state == Stopping, collected.length() == 0, processing.length() == 0, doFinish },
-    setAnyRepositoryAvailability,
+    {
+      nondet b = Set(true, false).oneOf()
+      doSetRepositoryAvailable(b)
+    },
     anyCall,
   }
 
@@ -522,13 +537,6 @@ module StatsFrameworkVerification {
   // random simulation; exhaustive tools explore every branch anyway, so these
   // steps list each operation once.
   //////////////////////////////////////////////////////////////////////////
-
-  action storeSampleFrom(procedures: Set[str], durations: Set[int]): bool = {
-    nondet c = MODEL_COLLECTORS.oneOf()
-    nondet p = procedures.oneOf()
-    nondet d = durations.oneOf()
-    doStoreStatsRecord(c, p, d)
-  }
 
   val totalAccepted: int = MODEL_COLLECTORS.fold(0, (acc, c) => acc + nextSeq.get(c))
   val totalDropped: int = MODEL_COLLECTORS.fold(0, (acc, c) => acc + dropped.get(c))
@@ -543,24 +551,40 @@ module StatsFrameworkVerification {
   // TLC: all distinct states within the bounds, at any depth
   action stepTlc = any {
     doStart,
-    all { storeWithinTlcBounds, storeSampleFrom(TLC_PROCEDURES, TLC_DURATIONS) },
+    {
+      nondet c = MODEL_COLLECTORS.oneOf()
+      nondet p = TLC_PROCEDURES.oneOf()
+      nondet d = TLC_DURATIONS.oneOf()
+      all { storeWithinTlcBounds, doStoreStatsRecord(c, p, d) }
+    },
     doFetch,
     doFlush,
     doStop,
     doFinish,
-    setAnyRepositoryAvailability,
+    {
+      nondet b = Set(true, false).oneOf()
+      doSetRepositoryAvailable(b)
+    },
   }
 
   // Apalache: all paths up to --max-steps, with ANY integer duration (the
   // solver finds the boundary values itself)
   action stepApalache = any {
     doStart,
-    storeSampleFrom(MODEL_PROCEDURES, Int),
+    {
+      nondet c = MODEL_COLLECTORS.oneOf()
+      nondet p = MODEL_PROCEDURES.oneOf()
+      nondet d = Int.oneOf()
+      doStoreStatsRecord(c, p, d)
+    },
     doFetch,
     doFlush,
     doStop,
     doFinish,
-    setAnyRepositoryAvailability,
+    {
+      nondet b = Set(true, false).oneOf()
+      doSetRepositoryAvailable(b)
+    },
   }
 
   // Everything checked on every state: INV-01 … INV-08 and TP-01
