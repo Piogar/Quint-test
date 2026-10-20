@@ -1,2 +1,5 @@
 # Apalache working files and logs (created by `quint verify`)
 _apalache-out/
+
+# CMake build directory
+build/

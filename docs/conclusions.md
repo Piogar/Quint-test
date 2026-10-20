@@ -723,7 +723,7 @@ Validate: configure and build with CMake, run the unit tests; all must pass.
 
 ## 5. MBT harness (C++)
 
-### 5.1 Notes for the harness prompt (to be written in Phase 6)
+### 5.1 Notes for the harness prompt
 Found while inspecting traces generated with
 `quint run --mbt --out-itf=...`. The prompt for generating the C++ MBT harness
 must make the harness handle these points:
@@ -763,3 +763,58 @@ to the repository, so the script makes them reproducible: fixed seed, and
 because otherwise every regeneration changes every file. Witness traces carry
 `"status": "violation"` in `#meta`; for the harness this means "scenario
 reached", not a failure.
+
+### 5.2 Prompt for generating the MBT harness
+Produces the harness used in this project (`tests/mbt_test.cpp`).
+
+```
+Generate a GoogleTest MBT harness in stats_framework/tests/mbt_test.cpp that
+replays every ITF trace in traces/random/ and traces/witness/ against the C++
+implementation (one parameterized test per trace file; trace directory passed
+from CMake as a compile definition).
+
+For every trace: build a fresh framework with the model values of
+StatsFrameworkVerification (holder 2, flusher 3, MAX_DURATION_US 10), create
+collectors on demand by id. State 0 must have mbt::actionTaken = "init".
+For every state:
+- execute the operation named in mbt::actionTaken (do<Op> -> C++ method from
+  the mapping table in docs/statsDESIGN.md) with arguments from
+  mbt::nondetPicks; doSetRepositoryAvailable drives the fake repository;
+- BG-01: compare the value returned by the C++ method with lastResult
+  (fetch(): ok=false <-> std::nullopt, else n); skip the
+  StoreStatsRecordResult label (void method);
+- BG-02: compare state, collected, processing (via StatsTestAccess), stored
+  and repoAvailable (via the fake repository) and the counters dropped,
+  overflowed, discarded, lost; do not compare ghost* variables or nextSeq.
+Handle everything listed in 5.1 (qualified variable names, ITF encoding,
+any order of operations). On the first difference fail with the trace file,
+step number, action, compared field, expected and actual value.
+
+Validate: build, run the harness on all traces (all pass), then check that
+the harness detects bugs: inject a few deliberate bugs in src/ one at a time
+(e.g. a counter not incremented, a wrong branch), confirm that traces fail,
+and restore the sources.
+```
+
+### 5.3 Result
+- Unit tests: 19 tests, all pass.
+- MBT: 507 traces (500 random + 7 witness) replayed, all pass (~2.5 s; `ctest` runs all 527 tests in ~7 s).
+- Mutation check (each bug injected alone, sources restored afterwards):
+
+| Injected bug | Traces that detect it | First difference reported |
+|---|---|---|
+| holder does not count dropped samples | 225 / 507 | `dropped[c1]`: expected 1, actual 0 |
+| failed `Flush` while `Stopping` keeps the samples instead of losing them | 274 / 507 | `processing` not empty |
+| holder keeps accepting samples while `Stopping` | 192 / 507 | `collected` contains a sample that should have been ignored |
+| `Fetch` ignores the flusher capacity | 47 / 507 | `FetchResult`: expected 1, actual 2 |
+
+A green MBT run alone does not show that the harness compares anything; the
+mutation check does. The rarest bug (flusher overflow) is still detected by
+47 traces, thanks to the improved `step` (coverage) and the witness traces.
+
+Design choice made while implementing: the flusher also needs the
+orchestrator state (Fetch rejected when Stopped; a failed Flush loses samples
+only while Stopping). It follows the same pattern as the holder: the
+orchestrator drives it (`StatsFlusher::setOrchestratorState`), so neither the
+flusher nor the holder depends on the orchestrator. Recorded in the mapping
+section of statsDESIGN.md.
