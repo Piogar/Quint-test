@@ -35,7 +35,11 @@ success" at the end.
 
 ## Commands for this spec
 
-Run all commands from the spec directory:
+**Everything at once:** `scripts/check_all.sh` runs steps 1–6 below plus the
+C++ build, unit tests and MBT, and fails at the first failing check
+(`--quick` skips the slow step 5, full verification). See README.md.
+
+Run all commands below from the spec directory:
 
 ```bash
 cd stats_framework/spec
@@ -135,15 +139,21 @@ quint verify stats.qnt --main=StatsFrameworkVerification \
 ```
 Measured (model values holder 2, flusher 3):
 - **TLC with `stepTlc`:** ~25 s, 1,401,775 distinct states (13.6 million
-  generated), complete state graph of depth 29, no violation.
+  generated), complete state graph of depth 29–30 (TLC with several workers
+  reports the depth slightly differently between runs), no violation.
 - **Apalache with `stepApalache`:** `--max-steps=4` ~76 s, `--max-steps=5`
   ~5 min, no violation.
 
 ### 6. Generate traces for MBT (Phase 5 of the workflow)
 Only from the verified spec. Run the script (from any directory):
 ```bash
-./scripts/gen_traces.sh
+./scripts/gen_traces.sh            # writes to traces/
+./scripts/gen_traces.sh <dir>      # writes to another directory
 ```
+⚠ Quint quirk: with `--n-traces`, Quint inserts the trace number before the
+**first dot of the whole `--out-itf` path**, not of the file name. A dot in
+any directory name (e.g. `/tmp/tmp.Ab12/…`) breaks the output path ("no such
+file or directory"). The script refuses such paths.
 It produces:
 - `traces/random/trace0.itf.json … trace499.itf.json`: 500 random traces ×
   30 steps, generated with `--invariant=allProperties` (the run fails if any

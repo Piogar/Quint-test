@@ -29,6 +29,23 @@ Why it matters:
 - **Clear review.** Reviewers can check requirements without verification
   noise, and verification without implementation detail.
 
+### Prompts are generic; the design document holds the details
+The design document is the **single source** of everything specific to the
+system: behavior, decisions, names, dependencies, visibility, model values,
+tool inputs, build and layout. The prompts for generating the spec, the code
+and the harness only describe the **process** (which sources to use, what to
+check, how to validate) and **point to sections** of the design document.
+
+- **No duplicated decisions:** a decision repeated in a prompt drifts from the
+  design document sooner or later, and the generator gets two sources that
+  contradict each other.
+- **Reusable prompts:** a prompt without system-specific names works for
+  another project with another design document; per-project values are
+  given as parameters (`<DESIGN_DOC>`, `<SPEC_MODULE>`, …).
+- **Complete design document:** if a generator needs a decision the design
+  document does not contain, the decision is added to the design document,
+  not to the prompt or only to the code.
+
 ### What each kind of property checks
 State Invariants and Temporal properties check the **spec** (is the design
 correct?); Behavioral Guarantees check the **implementation** (does the code
@@ -226,7 +243,7 @@ the spec (`StatsFramework`) and the architecture stayed unbounded.
 
 | Run | Before | After |
 |---|---|---|
-| TLC | no bound: never terminates (~82 million distinct states after ~1 h) | `stepTlc`: **~25 s**, 1,401,775 distinct states, complete state graph of depth 29, no violation |
+| TLC | no bound: never terminates (~82 million distinct states after ~1 h) | `stepTlc`: **~25 s**, 1,401,775 distinct states, complete state graph of depth 29–30, no violation |
 | Apalache, 4 steps | ~4 min (step 4 of the `--max-steps=10` run) | `stepApalache`: **~76 s**, no violation |
 | Apalache, 5 steps | > 2.5 h for step 5 alone | `stepApalache`: **~5 min**, no violation |
 | Apalache, 10 steps | stopped after ~3 h at step 6 | not tried; TLC already covers all bounded states at any depth |
@@ -344,14 +361,19 @@ special access.
 
 ### 2.4 Prompt for writing the design document
 Produces (or reviews) a design document that follows the rules in 1 and 2.1–2.3
-and can serve as the single source for the Quint spec, the C++ code and the
-MBT harness.
+and can serve as the single source for the Quint spec, the code and the MBT
+harness. Generic: the parameters are filled in per project.
+
+Parameters for this project: `<DESIGN_DOC>` = `docs/statsDESIGN.md`,
+`<SYSTEM>` = the stats framework, `<LANGUAGE>` = C++.
 
 ```
-Write (or revise) the design document docs/<name>DESIGN.md for <system>.
-It is the single source for generating the Quint spec, the C++ code and the
-MBT harness, so code design and test design must be kept in separate, clearly
-marked sections.
+Write (or revise) the design document <DESIGN_DOC> for <SYSTEM>.
+It is the single source for generating the Quint spec, the <LANGUAGE> code
+and the MBT harness: every decision those need must be written here, so that
+the generation prompts only point to sections of this document and never add
+decisions of their own. Code design and test design must be kept in separate,
+clearly marked sections.
 
 Code design (implementation behavior), language-neutral:
 - Overview: components and their responsibilities; data flow; execution model
@@ -384,24 +406,41 @@ Test design (verification only):
 - Behavioral Guarantees: properties over sequences of operations, checked on
   the implementation by MBT (traces from the spec replayed against the code),
   IDs BG-01, ...; include result conformance, state conformance and
-  rejection behavior.
-- Verification Only: small model values for the constants, finite domains for
-  operation arguments (including invalid values), environment actions, and
-  every helper that exists only for verification. Spec variables that have no
-  counterpart in the implementation are prefixed `ghost` and are not compared
-  by MBT.
+  rejection behavior; say which state is NOT compared and why.
+- Verification Only: small model values for the constants (sizes just above
+  every threshold in the logic, values reduced to the classes the logic
+  distinguishes, with the reason for each), finite domains for operation
+  arguments (including invalid values), environment actions, the inputs of
+  each exhaustive tool (e.g. bounds that make the state space finite for TLC,
+  symbolic values for Apalache), and every helper that exists only for
+  verification. Spec variables that have no counterpart in the implementation
+  are prefixed `ghost` and are not compared by MBT.
 - Witnesses: scenarios the spec must be able to reach, IDs W-01, ..., each
-  with the state condition that identifies it.
+  with the condition that identifies it; the condition must cover every part
+  of the description (if it is about the moment of an event, name the ghost
+  variable that records it).
 
 Language-specific part, in one separate section
-("Spec to Implementation Mapping (<language>)"):
+("Spec to Implementation Mapping (<LANGUAGE>)"):
 - For every spec element (state variable, constant, type, operation, query)
-  the implementation element: class, method, signature.
-- How the MBT harness drives each operation and reads each state variable.
+  the implementation element: class, method, signature, return value for
+  success and for rejection.
+- How the MBT harness drives each operation (including environment actions,
+  e.g. through test fakes) and reads each state variable.
 - Accessors: mark which are public API (needed in production, e.g. state,
   counters, sizes) and which are needed only by tests (e.g. snapshots of
-  internal containers). Test-only access must not be public API; use a
+  internal containers). Test-only access must not be public API; name the
   test-access mechanism (e.g. a friend test-access class).
+- Who checks what: for every operation whose behavior depends on the state
+  of another component (e.g. "ignored when not running"), say which component
+  checks it and how it learns that state. Dependencies must not form cycles;
+  prefer the owner of the state pushing it to the dependent component (e.g.
+  a lifecycle owner setting a flag) over the dependent component calling the
+  owner.
+- Behavior of operations called in any order (tests call them directly,
+  possibly in orders the production driver never uses).
+- Build and layout: language standard, build system, source and test
+  directories, test framework, and how to build and run the tests.
 - Rule: anything in the spec not listed in the mapping is verification-only
   and must not appear in the implementation.
 
@@ -412,6 +451,9 @@ Checks before finishing:
   "Verification Only", never in the code-design sections.
 - Every INV/TP/BG/W item has an ID and refers only to state, operations and
   results defined above.
+- Nothing a generator needs is left undecided (otherwise it would be decided
+  in a prompt or in code, and the document would stop being the single
+  source).
 ```
 
 ## 3. Quint specification (spec/stats.qnt)
@@ -509,30 +551,37 @@ and read state.
 ### 3.3 Prompt for generating the Quint spec
 A modified version of the original example prompt (see 3.4 for what changed
 and why). It produces a spec in the style of [../spec/stats.qnt](../spec/stats.qnt).
+Generic: project-specific content comes only from the design document.
+
+Parameters for this project: `<DESIGN_DOC>` = `docs/statsDESIGN.md`,
+`<SPEC_FILE>` = `spec/stats.qnt`, `<SPEC_MODULE>` = `StatsFramework`,
+`<VERIFICATION_MODULE>` = `StatsFrameworkVerification`.
 
 ```
-Generate a Quint specification from docs/statsDESIGN.md into spec/stats.qnt.
+Generate a Quint specification from <DESIGN_DOC> into <SPEC_FILE>. All
+system-specific content (state, operations, rules, invariants, witnesses,
+model values, tool inputs) comes from <DESIGN_DOC>; do not invent behavior.
 
 Modules (one file, two modules):
-- `StatsFramework`: the spec. A `const` for every design-doc Constant; no
-  model values here.
-- `StatsFrameworkVerification`: imports `StatsFramework` with the small model
-  values from "Verification Only"; contains `init`, `step`, witnesses and
-  scenario tests. Do not split verification into more modules (Quint does not
+- <SPEC_MODULE>: the spec. A `const` for every design-doc Constant; no model
+  values here.
+- <VERIFICATION_MODULE>: imports <SPEC_MODULE> with the model values from
+  "Verification Only"; contains `init`, the steps, witnesses and scenario
+  tests. Do not split verification into more modules (Quint does not
   re-export an imported instance).
 - Header comment with the naming rule: variables prefixed `ghost` exist only
   for verification, have no counterpart in the implementation and are not
   compared by MBT.
 
-StatsFramework:
+<SPEC_MODULE>:
 - Types from "Types" (records; sum types for enums).
 - A typed `var` for each state variable listed in "Abstract State", and a
   record type `Sys` holding all of them.
 - `var lastResult: OpResult`, where `OpResult` is a sum type with one variant
-  per operation carrying its result (e.g. `StopResult(bool)`,
-  `FetchResult({ ok: bool, n: int })`) plus `NoResult` for the initial state.
-  For an operation that reports nothing to its caller, use a verification-only
-  label variant and say so in a comment.
+  per operation carrying its result (e.g. `<Op>Result(bool)`, or a record
+  for richer results) plus `NoResult` for the initial state. For an operation
+  that reports nothing to its caller, use a verification-only label variant
+  and say so in a comment.
 - `type Transition = { sys: Sys, result: OpResult }` and helper
   `pure def mkTr(s, r)`.
 - One pure function `<op>Op(s: Sys, args...): Transition` per operation,
@@ -548,55 +597,52 @@ StatsFramework:
   functions.
 - An `init` action (`specInit`) setting all vars, including `lastResult` and
   `ghost*`, to their initial values.
-- `ghost*` variables for witnesses that describe a sequence of events
-  (history flags), updated in `applyTransition`.
+- The `ghost*` variables listed in "Verification Only", updated in
+  `applyTransition`.
 - Queries from "Queries" as `val`s.
-- A `val` for each individual invariant, named `invNN<Name>`
-  (e.g. `inv01BoundedCollected`), with a comment carrying the exact ID
-  (`// INV-01 BoundedCollected`).
+- A `val` for each individual invariant, named `invNN<Name>`, with a comment
+  carrying the exact ID (`// INV-NN <Name>`).
 - A `val safetyInvariant: bool` combining all INV-xx invariants with `and`.
 - Each bounded temporal property TP-xx as a state property named
   `tpNN<Name>`, computed by composing the pure `*Op` functions on `current`
-  (e.g. `finishOp(flushOp(fetchOp(current).sys).sys)`); kept out of
-  `safetyInvariant`.
-- No implementation details: no C++ class/method names or signatures (the
+  (e.g. `cOp(bOp(aOp(current).sys).sys)`); kept out of `safetyInvariant`.
+- No implementation details: no class/method names or signatures (the
   mapping stays in the design doc).
 - Inline comments mapping each element back to the design doc: section,
   operation name, owning component, INV/TP/BG/W IDs.
 
-StatsFrameworkVerification:
-- Model constant values as `pure val MODEL_*`, plus small finite domains for
-  operation arguments (including invalid values). Sizes (capacities, number
-  of identifiers) just above every threshold in the logic; values reduced to
-  the equivalence classes the logic distinguishes.
+<VERIFICATION_MODULE>:
+- The model values and argument domains from "Verification Only" as
+  `pure val MODEL_*`, and the inputs of each exhaustive tool as separate
+  constants (e.g. `TLC_*`).
 - `action init = specInit`.
 - An `anyCall = any { ... }` action listing all `do*` actions (arguments
   chosen with `nondet x = SET.oneOf()`), whether or not they can succeed.
-- A `step = any { ... }` action with guarded branches (`all { guard, doX }`),
-  so that most steps are operations that can succeed; branches that should be
-  picked more often listed several times (weights); and one `anyCall` branch,
-  so rejected calls still appear in traces. Guards here only choose test
-  inputs; spec actions stay unguarded.
+- A `step = any { ... }` action for simulation, with guarded branches
+  (`all { guard, doX }`) so that most steps are operations that can succeed;
+  branches that should be picked more often listed several times (weights);
+  and one `anyCall` branch, so rejected calls still appear in traces. Guards
+  here only choose test inputs; spec actions stay unguarded.
 - A `stepTlc = any { ... }` action for `quint verify --backend=tlc
-  --step=stepTlc`: each `do*` action once, reduced argument domains
-  (`TLC_*` constants), and a guard on every action that grows a counter, so
-  that counters stay within small bounds and the state space is finite.
+  --step=stepTlc`: each `do*` action once, the TLC inputs from "Verification
+  Only", and a guard on every action that grows an unbounded value, so that
+  the state space is finite.
 - A `stepApalache = any { ... }` action for `quint verify --step=stepApalache
   --max-steps=N`: each `do*` action once, integer arguments taken from `Int`
-  (symbolic) instead of a finite set.
+  (symbolic) where "Verification Only" says so.
 - Naming rule for all steps (`anyCall`, `step`, `stepTlc`, `stepApalache`):
   every branch calls exactly one `do<Op>` action, with arguments chosen by
   `nondet` inline in the branch, not in a separately named helper action.
   `quint run --mbt` records the name of the action chosen in the step as
   `mbt::actionTaken`; with this rule traces contain only `do<Op>` names, which
   map 1:1 to the operations of the design doc.
-- A scenario test for every boundary of a validity rule whose values are
-  reduced in `stepTlc`.
+- A scenario test for every boundary of a rule whose values are reduced in
+  `stepTlc`.
 - `val allProperties = safetyInvariant and <all tpNN...>`.
 - A `val` per witness W-xx, named `wNN<Name>`, with the scenario in POSITIVE
   form (true once it has happened), for `quint run --witnesses wNN<Name> ...`.
   A trace of one witness is obtained with `--invariant='not(wNN<Name>)'`.
-- A `run <name>Test` per witness plus one for rejections (BG-04), using
+- A `run <name>Test` per witness plus one for rejections, using
   `.then(...)` and `.expect(...)`; test names must end with `Test`.
 
 Validate: `quint typecheck`, `quint test`,
@@ -648,77 +694,69 @@ Workarounds considered, all weak:
   trace:** requires all scenarios in **one** trace (rare; W-04 and W-06
   practically exclude each other) and adds a state variable per witness.
 
-Current state: the witness list is written in the command
-(`--witnesses w01HolderFull … w07FlusherFull`), and the result has to be read
-by eye (every witness N > 0). Be aware of it when adding a witness: it must
-also be added to the command.
+Current state: the witness list lives in one place outside the spec,
+`scripts/common.sh`, used by `scripts/gen_traces.sh` (one trace per witness)
+and `scripts/check_all.sh` (fails if any witness has N = 0). This is the
+"list in a script" workaround above: it automates the check, but a new
+witness must still be added to `scripts/common.sh` by hand.
 
 ## 4. C++ implementation
 
 ### 4.1 Prompt for generating the C++ code
 Produces the implementation (Phase 4 of the workflow) from the design document
-and the spec. The MBT harness is a separate step (see 5).
+and the spec. The MBT harness is a separate step (see 5). Generic:
+everything specific to the system (classes, signatures, dependencies,
+visibility, layout) is taken from the design document.
+
+Parameters for this project: `<DESIGN_DOC>` = `docs/statsDESIGN.md`,
+`<SPEC_FILE>` = `spec/stats.qnt`, `<SPEC_MODULE>` = `StatsFramework`,
+`<VERIFICATION_MODULE>` = `StatsFrameworkVerification`,
+`<PROJECT_DIR>` = `stats_framework/`.
 
 ```
-Generate the C++ implementation of the stats framework in stats_framework/.
+Generate the C++ implementation of the system described in <DESIGN_DOC>, in
+<PROJECT_DIR>.
 
 Sources of truth:
-- docs/statsDESIGN.md: "Operations", "Flusher Conversion Rules", "Queries"
-  and "Spec to Implementation Mapping (C++)" (names, signatures, visibility,
-  build and layout);
-- spec/stats.qnt, module StatsFramework: the exact behavior of every
+- <DESIGN_DOC>: the code-design sections ("Operations", rules, "Queries")
+  and "Spec to Implementation Mapping (C++)" with all its subsections (names,
+  signatures, return values, visibility of accessors, who checks what, any
+  order of operations, build and layout). Implement exactly what they say;
+  do not add, rename or re-decide anything.
+- <SPEC_FILE>, module <SPEC_MODULE>: the exact behavior of every
   "Succeeds when / Rejected when" branch (pure functions <op>Op).
-Do NOT implement anything from "Verification Only" or from the module
-StatsFrameworkVerification: no ghost variables, no stored lastResult, no
-step actions, no witnesses, no model constants.
-
-Build and layout:
-- C++17, CMake (CMakeLists.txt in stats_framework/); library target from
-  src/, test executable from tests/.
-- src/: one .h and one .cpp per class; shared types (CollectorId,
-  ProcedureId, StatRecord, OrchestratorState, StatsConfig) in one header;
-  IStatsRepository as an interface header.
-- tests/: GoogleTest (via CMake FetchContent), the in-memory fake repository
-  with setAvailable(b), StatsTestAccess.
-
-API: exactly as in the mapping table (class and method names, signatures,
-return types, public vs. test-only). In particular:
-- start(), stop(), finish(), flush() return bool (success / rejected);
-  finish() is public;
-- storeStatsRecord() returns void (fire-and-forget);
-- fetch() returns std::optional<size_t>: std::nullopt when rejected, the
-  number of samples moved to processing (may be 0) on success;
-- tick() calls fetch(), flush() and, while stopping, finish(); it adds no
-  behavior of its own.
+Do NOT implement anything from "Verification Only" or from
+<VERIFICATION_MODULE>: no ghost variables, no stored lastResult, no step
+actions, no witnesses, no model values.
 
 Behavior: implement every branch of every operation exactly as in the design
 doc (same conditions, same effects). A rejected operation changes nothing
-except the effect its branch lists. Operations may be called in any order
-(MBT calls fetch(), flush() and finish() directly), so no method may assume
-the order used by tick().
+except the effect its branch lists. Operations may be called in any order, so
+no method may assume the order used by a production driver.
 
-Encapsulation: all data members private. Only the accessors listed as public
-in "Visibility of accessors" are public. StatsHolder and StatsFlusher declare
-`friend class StatsTestAccess;`; this declaration is the only test-related
-code allowed in src/. Rejections are return values, not exceptions.
+Encapsulation: all data members private; only the accessors the mapping lists
+as public are public; the test-access mechanism named in the mapping is the
+only test-related code allowed in the production sources. Rejections are
+return values, not exceptions, unless the mapping says otherwise.
 
-The "not running" check of StoreStatsRecord is in the holder, driven by the
-orchestrator, as described in "Who checks that the orchestrator is running":
-the collector depends only on the holder and never on the orchestrator.
+Dependencies: only those the mapping lists ("who checks what"); no cycles.
 
-Where the design doc leaves any other choice, choose the simplest solution
-that keeps the operations independent, and state the choice in a comment.
+If the design doc leaves a decision open that the code needs, choose the
+simplest solution that keeps the operations independent, state it in a
+comment, AND add it to the mapping section of the design doc, so that the
+design doc stays the single source.
 
 Comments: each operation cites its design-doc operation and branch (e.g.
-"// Operation: Fetch — Rejected when ..."), and each counter its design-doc
+"// Operation: <Op> — Rejected when ..."), and each member its design-doc
 state variable.
 
-Tests in this step: GoogleTest unit tests for the success and every
-rejection branch of each operation (mirroring the scenario tests in
-spec/stats.qnt), and one test that tick() behaves like fetch(), flush()
-(and finish() while stopping).
+Tests in this step: unit tests (test framework from "Build and layout") for
+the success and every rejection branch of each operation, mirroring the
+scenario tests in <VERIFICATION_MODULE>, and for any convenience method that
+composes operations (it must behave like the composed operations).
 
-Validate: configure and build with CMake, run the unit tests; all must pass.
+Validate: configure and build as described in "Build and layout", run the
+unit tests; all must pass.
 ```
 
 ## 5. MBT harness (C++)
@@ -765,35 +803,51 @@ because otherwise every regeneration changes every file. Witness traces carry
 reached", not a failure.
 
 ### 5.2 Prompt for generating the MBT harness
-Produces the harness used in this project (`tests/mbt_test.cpp`).
+Produces the harness used in this project (`tests/mbt_test.cpp`). Generic:
+model values, operations, state variables and accessors come from the design
+document; 5.1 lists what was found about the traces of this project.
+
+Parameters for this project: `<DESIGN_DOC>` = `docs/statsDESIGN.md`,
+`<VERIFICATION_MODULE>` = `StatsFrameworkVerification`,
+`<TRACES_DIR>` = `traces/` (subdirectories `random/`, `witness/`),
+`<HARNESS_FILE>` = `tests/mbt_test.cpp`.
 
 ```
-Generate a GoogleTest MBT harness in stats_framework/tests/mbt_test.cpp that
-replays every ITF trace in traces/random/ and traces/witness/ against the C++
-implementation (one parameterized test per trace file; trace directory passed
-from CMake as a compile definition).
+Generate an MBT harness in <HARNESS_FILE> (test framework from "Build and
+layout" in <DESIGN_DOC>) that replays every ITF trace in <TRACES_DIR>
+against the implementation: one parameterized test per trace file; the trace
+directory passed from the build system.
 
-For every trace: build a fresh framework with the model values of
-StatsFrameworkVerification (holder 2, flusher 3, MAX_DURATION_US 10), create
-collectors on demand by id. State 0 must have mbt::actionTaken = "init".
-For every state:
-- execute the operation named in mbt::actionTaken (do<Op> -> C++ method from
-  the mapping table in docs/statsDESIGN.md) with arguments from
-  mbt::nondetPicks; doSetRepositoryAvailable drives the fake repository;
-- BG-01: compare the value returned by the C++ method with lastResult
-  (fetch(): ok=false <-> std::nullopt, else n); skip the
-  StoreStatsRecordResult label (void method);
-- BG-02: compare state, collected, processing (via StatsTestAccess), stored
-  and repoAvailable (via the fake repository) and the counters dropped,
-  overflowed, discarded, lost; do not compare ghost* variables or nextSeq.
-Handle everything listed in 5.1 (qualified variable names, ITF encoding,
-any order of operations). On the first difference fail with the trace file,
-step number, action, compared field, expected and actual value.
+For every trace: build a fresh system with the model values from
+"Verification Only" in <DESIGN_DOC> (the values <VERIFICATION_MODULE> used to
+generate the traces); create instances that the traces refer to by id on
+demand. State 0 must have mbt::actionTaken = "init". For every state:
+- execute the operation named in mbt::actionTaken: `do<Op>` is operation
+  <Op> in "Spec to Implementation Mapping"; its arguments are in
+  mbt::nondetPicks; environment actions are driven through the test fakes
+  named in the mapping;
+- result conformance (BG): compare the value returned by the method with
+  lastResult, as the mapping defines success and rejection values; skip the
+  variants the spec marks as verification-only labels;
+- state conformance (BG): compare every state variable that has an
+  implementation counterpart in the mapping (test-only state through the
+  test-access mechanism of the mapping); do not compare ghost* variables or
+  the state the design doc says is not compared.
+
+ITF handling: variable names are fully qualified (strip everything up to the
+last `::`); sum types are {"tag", "value"} (Option picks: tag Some/None),
+maps {"#map": [[k, v], ...]}, tuples {"#tup": [...]}, integers
+{"#bigint": "..."} or plain numbers, lists JSON arrays, records JSON objects.
+Witness traces have "status": "violation" in #meta: that means "scenario
+reached", not an error. Operations may appear in any order.
+
+On the first difference fail with the trace file, step number, action,
+compared field, expected and actual value.
 
 Validate: build, run the harness on all traces (all pass), then check that
-the harness detects bugs: inject a few deliberate bugs in src/ one at a time
-(e.g. a counter not incremented, a wrong branch), confirm that traces fail,
-and restore the sources.
+the harness detects bugs: inject a few deliberate bugs in the production
+sources one at a time (e.g. a counter not incremented, a wrong branch),
+confirm that traces fail, and restore the sources.
 ```
 
 ### 5.3 Result

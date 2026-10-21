@@ -2,23 +2,28 @@
 # Generate ITF traces from spec/stats.qnt for the C++ MBT harness
 # (Phase 5 of the workflow).
 #
-#   traces/random/   500 random traces × 30 steps (fixed seed, reproducible)
-#   traces/witness/  one targeted trace per witness W-01 … W-07
+#   <out>/random/   500 random traces × 30 steps (fixed seed, reproducible)
+#   <out>/witness/  one targeted trace per witness W-01 … W-07
+#
+# Usage: scripts/gen_traces.sh [output-dir]   (default: traces/)
 #
 # Traces are test cases and are committed to the repository. Regenerate them
 # (run this script again) after every change to the spec.
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SPEC="$ROOT/spec/stats.qnt"
-MAIN=StatsFrameworkVerification
-OUT="$ROOT/traces"
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+OUT="$(mkdir -p "${1:-$ROOT/traces}" && cd "${1:-$ROOT/traces}" && pwd)"
+
+# Quint quirk: with --n-traces it inserts the trace number before the FIRST
+# dot of the whole --out-itf path (not of the file name), so a dot in any
+# directory name breaks the output path.
+case "$OUT" in
+  *.*) echo "FAIL: output path must not contain '.' (Quint --n-traces quirk): $OUT"; exit 1 ;;
+esac
 
 SEED=0x5747a75        # fixed seed: the same spec always gives the same traces
 N_TRACES=500
 MAX_STEPS=30
-WITNESSES="w01HolderFull w02FlushRetried w03InvalidDiscarded w04StopWithRepositoryDown w05FullCycle w06StopDrainsToRepository w07FlusherFull"
 
 rm -rf "$OUT/random" "$OUT/witness"
 mkdir -p "$OUT/random" "$OUT/witness"
@@ -30,9 +35,9 @@ echo "== random traces ($N_TRACES × $MAX_STEPS steps)"
 quint run "$SPEC" --main=$MAIN --invariant=allProperties --mbt \
   --max-steps=$MAX_STEPS --max-samples=$N_TRACES --n-traces=$N_TRACES --seed=$SEED \
   --out-itf="$OUT/random/trace.itf.json" > "$OUT/random.log" 2>&1 \
-  || { echo "FAIL: quint run failed (see traces/random.log)"; exit 1; }
+  || { echo "FAIL: quint run failed (see $OUT/random.log)"; exit 1; }
 rm -f "$OUT/random.log"
-echo "   $(ls "$OUT/random" | wc -l) files in traces/random/"
+echo "   $(ls "$OUT/random" | wc -l) files in random/"
 
 echo "== witness traces"
 fail=0
@@ -46,7 +51,7 @@ for w in $WITNESSES; do
     echo "   FAIL: $w not reached"; fail=1
     rm -f "$OUT/witness/$w.itf.json"
   else
-    echo "   $w -> traces/witness/$w.itf.json"
+    echo "   $w -> witness/$w.itf.json"
   fi
 done
 

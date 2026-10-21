@@ -321,7 +321,7 @@ Termination of shutdown is a temporal property and is checked on the spec
 | Fetch                        | `std::optional<size_t> StatsFlusher::fetch()` taking all collected samples from `StatsHolder` |
 | Flush                        | `bool StatsFlusher::flush()` calling `convert()` then `IStatsRepository::write()` |
 | Finish                       | `bool StatsOrchestrator::finish()`, public (the application may call it; `tick()` calls it while stopping; MBT calls it directly) |
-| Flusher conversion rules     | `std::vector<StatRecord> StatsFlusher::convert(const std::vector<StatRecord>&)` plus invalid count |
+| Flusher conversion rules     | `std::vector<StatRecord> StatsFlusher::convert(const std::vector<StatRecord>&) const`: pure, returns the valid samples unchanged and in order; `flush()` counts the invalid ones in `discarded` |
 | SetRepositoryAvailable(b)    | `setAvailable(b)` on the in-memory fake repository (test only) |
 
 In production the application calls `void StatsOrchestrator::tick()`
@@ -399,6 +399,8 @@ test builds are the same.
   ./build/stats_mbt_tests      # MBT: replays all traces in traces/
   ```
   (or `ctest --test-dir build` for both).
+- All checks of the project (Quint, traces up to date, C++ build and tests):
+  `scripts/check_all.sh` (see README.md).
 
 ## Verification Only (not implementation behavior)
 - Model constants: `COLLECTORS = {"c1", "c2"}`, `PROCEDURES = {"p1", "p2"}`,
